@@ -139,6 +139,9 @@ Most real delays are a few milliseconds, far too short to see, so a dot travels 
 buffers packets for up to several seconds while it searches for a route) visibly take longer. The CSV records only the endpoints, not the hops in between, so
 dots move on a straight line.
 
+The **Packets: ON / OFF** button in the left panel (keyboard shortcut **P**) turns the animation on or off.
+Metrics and graphs keep updating either way.
+
 ### Graphs
 
 Three Qt Charts line graphs (PDR, throughput, per-second delay) with one point per simulation second.

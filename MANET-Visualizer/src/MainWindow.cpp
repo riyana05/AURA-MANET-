@@ -72,6 +72,8 @@ QPushButton:disabled { color: #475569; background: #131c2e; border-color: #1e293
 QPushButton#playButton { background: #0ea5e9; color: #04111f; border: none; font-weight: 600; }
 QPushButton#playButton:hover { background: #38bdf8; }
 QPushButton#playButton:disabled { background: #13324a; color: #3b5b75; }
+QPushButton#toggleButton:checked { background: #14532d; border-color: #22c55e; color: #bbf7d0; }
+QPushButton#toggleButton:checked:hover { background: #166534; }
 
 QComboBox {
     background: #1e293b; color: #e2e8f0;
@@ -166,9 +168,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_showAllRangesCheck, &QCheckBox::toggled, this, [this]() {
         updateNetwork(m_engine->currentTime());
     });
-    connect(m_showPacketsCheck, &QCheckBox::toggled, this, [this]() {
-        updateNetwork(m_engine->currentTime());
-    });
+    connect(m_packetsToggle, &QPushButton::toggled, this, &MainWindow::onPacketsToggled);
     connect(m_scene, &QGraphicsScene::selectionChanged, this, &MainWindow::onSelectionChanged);
 
     // Refit the network whenever the view changes size
@@ -245,8 +245,14 @@ void MainWindow::buildUi()
     m_rangeSpinBox->setValue(m_engine->communicationRange());
 
     m_showAllRangesCheck = new QCheckBox("Show range of every node");
-    m_showPacketsCheck = new QCheckBox("Show packets");
-    m_showPacketsCheck->setChecked(true);
+    // Switch that turns the packet animation on and off (shortcut: P)
+    m_packetsToggle = new QPushButton;
+    m_packetsToggle->setObjectName("toggleButton");
+    m_packetsToggle->setCheckable(true);
+    m_packetsToggle->setChecked(true);
+    m_packetsToggle->setShortcut(QKeySequence(Qt::Key_P));
+    m_packetsToggle->setToolTip("Show or hide the moving packets (P)");
+    onPacketsToggled(true);
 
     m_nodeCountLabel = new QLabel("–");
     m_linkCountLabel = new QLabel("–");
@@ -273,7 +279,8 @@ void MainWindow::buildUi()
     sideLayout->addWidget(rangeCaption);
     sideLayout->addWidget(m_rangeSpinBox);
     sideLayout->addWidget(m_showAllRangesCheck);
-    sideLayout->addWidget(m_showPacketsCheck);
+    sideLayout->addSpacing(4);
+    sideLayout->addWidget(m_packetsToggle);
     sideLayout->addSpacing(14);
     sideLayout->addLayout(countsRow);
     sideLayout->addWidget(makeStatCard("Simulation time", m_timeLabel));
@@ -833,7 +840,7 @@ void MainWindow::updatePackets(double time, const QMap<int, QPointF> &positions)
     QPainterPath delivered;
     QPainterPath lost;
 
-    if (m_showPacketsCheck->isChecked() && m_packetMetrics.hasPackets()) {
+    if (m_packetsToggle->isChecked() && m_packetMetrics.hasPackets()) {
         double speed = m_speedCombo->currentData().toDouble();
         double minTravelTime = PacketMinVisibleSeconds * speed; // in simulation seconds
 
@@ -996,7 +1003,7 @@ void MainWindow::setControlsEnabled(bool enabled)
     m_timelineSlider->setEnabled(enabled);
     m_rangeSpinBox->setEnabled(enabled);
     m_showAllRangesCheck->setEnabled(enabled);
-    m_showPacketsCheck->setEnabled(enabled);
+    m_packetsToggle->setEnabled(enabled);
 }
 
 void MainWindow::openCsvDialog()
@@ -1057,6 +1064,12 @@ void MainWindow::onSelectionChanged()
         }
     }
 
+    updateNetwork(m_engine->currentTime());
+}
+
+void MainWindow::onPacketsToggled(bool on)
+{
+    m_packetsToggle->setText(on ? "●   Packets: ON" : "○   Packets: OFF");
     updateNetwork(m_engine->currentTime());
 }
 

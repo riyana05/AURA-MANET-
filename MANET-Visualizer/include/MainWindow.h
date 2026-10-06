@@ -47,6 +47,7 @@ private slots:
     void onSpeedChanged(int index);
     void onRangeChanged(double metres);
     void onSelectionChanged();
+    void onPacketsToggled(bool on);
 
 private:
     void buildUi();
@@ -95,7 +96,7 @@ private:
     QLabel *m_linkCountLabel = nullptr;
     QDoubleSpinBox *m_rangeSpinBox = nullptr;
     QCheckBox *m_showAllRangesCheck = nullptr;
-    QCheckBox *m_showPacketsCheck = nullptr;
+    QPushButton *m_packetsToggle = nullptr; // on/off switch for the packet animation
 
     // Metrics panel
     QLabel *m_pdrLabel = nullptr;
