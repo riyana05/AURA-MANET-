@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QFile>
+#include <QScreen>
 
 int main(int argc, char *argv[])
 {
@@ -9,7 +10,9 @@ int main(int argc, char *argv[])
     app.setStyle("Fusion");
 
     MainWindow window;
-    window.resize(1440, 880);
+    // Large enough for the network, the metrics panel and both side panels
+    QRect screen = window.screen()->availableGeometry();
+    window.resize(qMin(1600, int(screen.width() * 0.95)), qMin(1000, int(screen.height() * 0.95)));
     window.show();
 
     // Usage: MANETVisualizer [path/to/mobility.csv]

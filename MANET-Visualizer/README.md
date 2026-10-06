@@ -3,14 +3,15 @@
 Desktop app that plays back the node movement recorded by the NS-3 scenario in
 [`../ns-3.48/scratch/random-waypoint-manet.cc`](../ns-3.48/scratch/random-waypoint-manet.cc).
 
-**Current status: Phase 2.**
+**Current status: Phase 3.**
 - Phase 1: moving nodes, Play / Pause / Reset, speed, timeline
 - Phase 2: communication range, dynamic links, node selection, selected-node info panel
+- Phase 3: packet animation, packet information, PDR, throughput, delay, performance graphs
 
 ## Build and run (macOS)
 
 ```bash
-brew install qt cmake          # once
+brew install qt cmake          # once (includes Qt Charts)
 
 cd MANET-Visualizer
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
@@ -24,10 +25,11 @@ You can also load a file from the **Open CSV…** button.
 
 ## Updating the data
 
-The app reads `data/node_mobility.csv`. After re-running the NS-3 simulation, copy the new file over:
+The app reads `data/node_mobility.csv`, plus `packets.csv` if it is in the same folder.
+After re-running the NS-3 simulation, copy the new files over:
 
 ```bash
-cp ../ns-3.48/MetricsOutput/node_mobility.csv data/
+cp ../ns-3.48/MetricsOutput/node_mobility.csv ../ns-3.48/MetricsOutput/packets.csv data/
 ```
 
 ## CSV format
@@ -84,3 +86,60 @@ Columns are found by header name, so their order does not matter. Rows can be in
 - **Selection:** click a node to select it (a white ring is drawn around it). Click empty space to deselect. The
   right panel shows the node's ID, X/Y (metres), simulation time, neighbour count, neighbour IDs and range,
   and updates live while the simulation plays.
+
+## Phase 3: packets and network metrics
+
+### packets.csv
+
+Written by the NS-3 scenario at the end of the run, one row per application packet:
+
+```
+packet_id,flow_id,source,destination,send_time,receive_time,delay_ms,size_bytes,status
+40,0,1,4,1.128000,3.139606,2011.606,1024,received
+160,0,1,4,1.384000,,,1024,lost
+```
+
+| Column | Meaning |
+|---|---|
+| `packet_id` | ns-3 packet UID (unique; copies of a packet keep it, so sent and received packets can be matched) |
+| `flow_id` | Which of the UDP flows (0 to flows-1) the packet belongs to |
+| `source`, `destination` | Node IDs of the flow's sender and receiver |
+| `send_time` | When the OnOff application sent it (s, microsecond precision) |
+| `receive_time` | When the PacketSink received it (s); empty if lost |
+| `delay_ms` | `receive_time − send_time` in ms (the GUI recomputes it from the two times) |
+| `size_bytes` | Application payload size (1024) |
+| `status` | `received` or `lost` (not delivered before the simulation ended) |
+
+Each row is an event pair (send + receive), not a periodic snapshot.
+
+### How the metrics are computed (`PacketMetrics`)
+
+All values at time *t* come from `packets.csv`:
+
+| Metric | Definition |
+|---|---|
+| Sent / Received | packets with `send_time ≤ t` / `receive_time ≤ t` |
+| Lost | packets sent by *t* that never arrive |
+| PDR | `received / sent × 100` (packets still in flight count as not yet received) |
+| Throughput | payload bytes received in `(t − 1 s, t]` × 8 / 1000 → kbps |
+| Average delay | mean `receive_time − send_time` of all packets delivered by *t* |
+| Delay graph | mean delay of the packets delivered during each second |
+
+Sorted send/receive times plus running totals mean each value needs only a binary search.
+The GUI's values match NS-3's own `network_metrics.csv` for every second of the run.
+
+`PacketMetrics` is a new class so that `SimulationEngine` stays focused on time and positions.
+
+### Packet animation
+
+Each packet is drawn as a dot moving from its source to its destination, using the nodes' positions at
+the current time. Delivered packets are green and lost packets are red. A lost packet only gets halfway, then disappears.
+The real delays are mostly about 1–5 ms, far too short to see, so a dot travels for
+`max(real delay, 0.4 s × playback speed)` of simulation time. Packets that waited a long time (e.g. during
+an AODV route discovery) visibly take longer. The CSV records only the endpoints, not the hops in between, so
+dots move on a straight line.
+
+### Graphs
+
+Three Qt Charts line graphs (PDR, throughput, per-second delay) with one point per simulation second.
+They fill in up to the current time while playing and follow the timeline slider.

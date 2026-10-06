@@ -4,8 +4,11 @@
 #include "NodeItem.h"
 #include "SimulationEngine.h"
 
+#include <QChart>
+#include <QChartView>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileDialog>
@@ -20,13 +23,16 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineSeries>
 #include <QMessageBox>
 #include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QVBoxLayout>
+#include <QValueAxis>
 
 #include <cmath>
 
@@ -36,6 +42,10 @@ static const double NetworkDrawSize = 900.0;
 // Empty space around the network area (room for the axis labels)
 static const double ScenePadding = 70.0;
 static const double NodeRadius = 14.0;
+static const double PacketDotRadius = 5.0;
+// Most packets arrive within a few milliseconds, far too fast to see, so every
+// packet dot stays on screen for at least this long in real (wall-clock) seconds.
+static const double PacketMinVisibleSeconds = 0.4;
 
 static const char *StyleSheet = R"(
 QWidget#central { background: #0b1220; }
@@ -84,6 +94,13 @@ QFrame#infoPanel { background: #0f172a; border-left: 1px solid #1e293b; }
 QLabel#infoTitle { color: #f1f5f9; font-size: 20px; font-weight: 600; }
 QLabel#infoValue { color: #f1f5f9; font-size: 14px; font-weight: 600; }
 QLabel#placeholder { color: #64748b; font-size: 13px; }
+
+QFrame#metricsPanel { background: #0b1220; border-top: 1px solid #1e293b; }
+QLabel#metricValue { color: #f1f5f9; font-size: 18px; font-weight: 600; }
+QLabel#packetInfo { color: #cbd5e1; font-size: 12px; }
+QLabel#legend { color: #64748b; font-size: 11px; }
+QSplitter::handle { background: #1e293b; }
+QSplitter::handle:vertical { height: 3px; }
 
 QFrame#timelinePanel { background: #0f172a; border-top: 1px solid #1e293b; }
 QLabel#timelineEdge { color: #64748b; font-size: 12px; }
@@ -147,6 +164,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_speedCombo, &QComboBox::currentIndexChanged, this, &MainWindow::onSpeedChanged);
     connect(m_rangeSpinBox, &QDoubleSpinBox::valueChanged, this, &MainWindow::onRangeChanged);
     connect(m_showAllRangesCheck, &QCheckBox::toggled, this, [this]() {
+        updateNetwork(m_engine->currentTime());
+    });
+    connect(m_showPacketsCheck, &QCheckBox::toggled, this, [this]() {
         updateNetwork(m_engine->currentTime());
     });
     connect(m_scene, &QGraphicsScene::selectionChanged, this, &MainWindow::onSelectionChanged);
@@ -225,6 +245,8 @@ void MainWindow::buildUi()
     m_rangeSpinBox->setValue(m_engine->communicationRange());
 
     m_showAllRangesCheck = new QCheckBox("Show range of every node");
+    m_showPacketsCheck = new QCheckBox("Show packets");
+    m_showPacketsCheck->setChecked(true);
 
     m_nodeCountLabel = new QLabel("–");
     m_linkCountLabel = new QLabel("–");
@@ -251,6 +273,7 @@ void MainWindow::buildUi()
     sideLayout->addWidget(rangeCaption);
     sideLayout->addWidget(m_rangeSpinBox);
     sideLayout->addWidget(m_showAllRangesCheck);
+    sideLayout->addWidget(m_showPacketsCheck);
     sideLayout->addSpacing(14);
     sideLayout->addLayout(countsRow);
     sideLayout->addWidget(makeStatCard("Simulation time", m_timeLabel));
@@ -270,7 +293,17 @@ void MainWindow::buildUi()
     middleLayout->setContentsMargins(0, 0, 0, 0);
     middleLayout->setSpacing(0);
     middleLayout->addWidget(sidePanel);
-    middleLayout->addWidget(m_view, 1);
+
+    // Network on top, metrics and graphs below; the user can drag the divider
+    QSplitter *centerSplitter = new QSplitter(Qt::Vertical);
+    centerSplitter->addWidget(m_view);
+    centerSplitter->addWidget(buildMetricsPanel());
+    centerSplitter->setStretchFactor(0, 1);
+    centerSplitter->setStretchFactor(1, 0);
+    centerSplitter->setChildrenCollapsible(false);
+    centerSplitter->setSizes({640, 360}); // initial split, in proportion
+
+    middleLayout->addWidget(centerSplitter, 1);
     middleLayout->addWidget(buildInfoPanel());
 
     // ---- Timeline ----
@@ -365,6 +398,11 @@ QFrame *MainWindow::buildInfoPanel()
     addInfoRow(grid, 3, "Neighbors", m_infoNeighborCount);
     addInfoRow(grid, 4, "Range", m_infoRange);
 
+    m_infoPacketsSent = new QLabel;
+    m_infoPacketsReceived = new QLabel;
+    addInfoRow(grid, 5, "Packets sent", m_infoPacketsSent);
+    addInfoRow(grid, 6, "Packets received", m_infoPacketsReceived);
+
     QLabel *neighborListCaption = new QLabel("Neighbor IDs");
     neighborListCaption->setObjectName("caption");
     m_infoNeighborList = new QLabel;
@@ -398,6 +436,118 @@ void MainWindow::addInfoRow(QGridLayout *grid, int row, const QString &caption, 
     grid->addWidget(valueLabel, row, 1);
 }
 
+QWidget *MainWindow::buildMetricsPanel()
+{
+    QFrame *panel = new QFrame;
+    panel->setObjectName("metricsPanel");
+    QVBoxLayout *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(16, 12, 16, 12);
+    layout->setSpacing(8);
+
+    QLabel *heading = new QLabel("NETWORK PERFORMANCE");
+    heading->setObjectName("sectionHeading");
+
+    m_pdrLabel = new QLabel("–");
+    m_throughputLabel = new QLabel("–");
+    m_delayLabel = new QLabel("–");
+    m_sentLabel = new QLabel("–");
+    m_receivedLabel = new QLabel("–");
+    m_lostLabel = new QLabel("–");
+
+    QHBoxLayout *cardsRow = new QHBoxLayout;
+    cardsRow->setSpacing(10);
+    cardsRow->addWidget(makeStatCard("PDR", m_pdrLabel));
+    cardsRow->addWidget(makeStatCard("Throughput (last 1 s)", m_throughputLabel));
+    cardsRow->addWidget(makeStatCard("Average delay", m_delayLabel));
+    cardsRow->addWidget(makeStatCard("Sent", m_sentLabel));
+    cardsRow->addWidget(makeStatCard("Received", m_receivedLabel));
+    cardsRow->addWidget(makeStatCard("Lost", m_lostLabel));
+    const QList<QLabel *> metricLabels = {m_pdrLabel, m_throughputLabel, m_delayLabel,
+                                          m_sentLabel, m_receivedLabel, m_lostLabel};
+    for (QLabel *label : metricLabels) {
+        label->setObjectName("metricValue");
+    }
+
+    m_packetInfoLabel = new QLabel("No packets CSV loaded.");
+    m_packetInfoLabel->setObjectName("packetInfo");
+    m_packetInfoLabel->setWordWrap(true);
+
+    QLabel *legend = new QLabel(
+        "<span style='color:#4ade80'>●</span> delivered packet &nbsp;&nbsp;"
+        "<span style='color:#f87171'>●</span> lost packet &nbsp;&nbsp;— "
+        "packets are drawn on a straight line from source to destination "
+        "(the hops in between are not recorded) and stay visible for at least "
+        + QString::number(PacketMinVisibleSeconds) + " s.");
+    legend->setObjectName("legend");
+    legend->setWordWrap(true);
+
+    m_pdrSeries = new QLineSeries;
+    m_throughputSeries = new QLineSeries;
+    m_delaySeries = new QLineSeries;
+
+    m_chartsRow = new QWidget;
+    QHBoxLayout *chartsLayout = new QHBoxLayout(m_chartsRow);
+    chartsLayout->setContentsMargins(0, 0, 0, 0);
+    chartsLayout->setSpacing(10);
+    chartsLayout->addWidget(makeChart("PDR (%)", m_pdrSeries, QColor("#4ade80")));
+    chartsLayout->addWidget(makeChart("Throughput (kbps)", m_throughputSeries, QColor("#38bdf8")));
+    chartsLayout->addWidget(makeChart("Delay (ms, per second)", m_delaySeries, QColor("#fbbf24")));
+
+    layout->addWidget(heading);
+    layout->addLayout(cardsRow);
+    layout->addWidget(m_packetInfoLabel);
+    layout->addWidget(legend);
+    layout->addWidget(m_chartsRow, 1);
+    return panel;
+}
+
+QChartView *MainWindow::makeChart(const QString &title, QLineSeries *series, const QColor &color)
+{
+    QChart *chart = new QChart;
+    chart->legend()->hide();
+    chart->setAnimationOptions(QChart::NoAnimation);
+    chart->setBackgroundBrush(QColor("#111c33"));
+    chart->setBackgroundPen(QPen(QColor("#1e293b")));
+    chart->setBackgroundRoundness(10);
+    chart->setMargins(QMargins(4, 0, 8, 2));
+
+    QFont titleFont;
+    titleFont.setPixelSize(12);
+    titleFont.setBold(true);
+    chart->setTitle(title);
+    chart->setTitleFont(titleFont);
+    chart->setTitleBrush(QColor("#94a3b8"));
+
+    series->setPen(QPen(color, 2));
+    chart->addSeries(series);
+
+    QFont axisFont;
+    axisFont.setPixelSize(10);
+
+    QValueAxis *axisX = new QValueAxis;
+    QValueAxis *axisY = new QValueAxis;
+    const QList<QValueAxis *> axes = {axisX, axisY};
+    for (QValueAxis *axis : axes) {
+        axis->setLabelFormat("%.0f");
+        axis->setLabelsFont(axisFont);
+        axis->setLabelsColor(QColor("#64748b"));
+        axis->setGridLineColor(QColor("#1e293b"));
+        axis->setLinePenColor(QColor("#334155"));
+        axis->setTickCount(5);
+    }
+    chart->addAxis(axisX, Qt::AlignBottom);
+    chart->addAxis(axisY, Qt::AlignLeft);
+    series->attachAxis(axisX);
+    series->attachAxis(axisY);
+
+    QChartView *view = new QChartView(chart);
+    view->setRenderHint(QPainter::Antialiasing);
+    view->setMinimumHeight(140);
+    view->setMaximumHeight(240);
+    view->setStyleSheet("background: transparent;");
+    return view;
+}
+
 bool MainWindow::loadCsv(const QString &filePath)
 {
     CsvLoader loader;
@@ -416,10 +566,14 @@ bool MainWindow::loadCsv(const QString &filePath)
     m_rangeItems.clear();
     m_linksItem = nullptr;
     m_selectedLinksItem = nullptr;
+    m_packetsItem = nullptr;
+    m_lostPacketsItem = nullptr;
     m_selectedNodeId = -1;
 
     m_engine->setSamples(loader.samples());
     buildScene();
+    loadPacketsNextTo(filePath);
+    setupCharts();
 
     double duration = m_engine->endTime() - m_engine->startTime();
     {
@@ -430,7 +584,11 @@ bool MainWindow::loadCsv(const QString &filePath)
     m_startTimeLabel->setText(formatTime(m_engine->startTime()));
     m_endTimeLabel->setText(formatTime(m_engine->endTime()));
     m_nodeCountLabel->setText(QString::number(m_engine->nodeCount()));
-    m_fileLabel->setText(QFileInfo(filePath).fileName());
+    QString fileNames = QFileInfo(filePath).fileName();
+    if (!m_packetsFileName.isEmpty()) {
+        fileNames += "  +  " + m_packetsFileName;
+    }
+    m_fileLabel->setText(fileNames);
 
     m_dataLoaded = true;
     setControlsEnabled(true);
@@ -443,8 +601,80 @@ bool MainWindow::loadCsv(const QString &filePath)
     if (loader.skippedLines() > 0) {
         message += QString(" (%1 invalid lines skipped)").arg(loader.skippedLines());
     }
+    if (m_packetMetrics.hasPackets()) {
+        message += QString(", %1 packets from %2")
+                       .arg(m_packetMetrics.packets().size())
+                       .arg(m_packetsFileName);
+    } else {
+        message += " (no packets.csv found next to it)";
+    }
     statusBar()->showMessage(message);
     return true;
+}
+
+void MainWindow::loadPacketsNextTo(const QString &mobilityCsvPath)
+{
+    m_packetMetrics.clear();
+    m_packetsFileName.clear();
+
+    QString packetsPath = QFileInfo(mobilityCsvPath).dir().filePath("packets.csv");
+    if (!QFile::exists(packetsPath)) {
+        return;
+    }
+
+    CsvLoader loader;
+    if (!loader.loadPackets(packetsPath)) {
+        QMessageBox::warning(this, "Could not load packets CSV", loader.errorString());
+        return;
+    }
+
+    m_packetMetrics.setPackets(loader.packets(), m_engine->startTime(), m_engine->endTime());
+    m_packetsFileName = QFileInfo(packetsPath).fileName();
+}
+
+// Highest Y value in a series, used to scale the graph's Y axis
+static double maxY(const QVector<QPointF> &points)
+{
+    double highest = 0.0;
+    for (const QPointF &point : points) {
+        highest = qMax(highest, point.y());
+    }
+    return highest;
+}
+
+static void setAxisRanges(QLineSeries *series, double minX, double maxX, double maxYValue)
+{
+    const QList<QAbstractAxis *> axes = series->attachedAxes();
+    for (QAbstractAxis *axis : axes) {
+        QValueAxis *valueAxis = qobject_cast<QValueAxis *>(axis);
+        if (!valueAxis) {
+            continue;
+        }
+        if (valueAxis->orientation() == Qt::Horizontal) {
+            valueAxis->setRange(minX, maxX);
+        } else {
+            valueAxis->setRange(0.0, maxYValue > 0.0 ? maxYValue : 1.0);
+            valueAxis->applyNiceNumbers(); // round tick values, e.g. 0, 200, 400 ...
+        }
+    }
+}
+
+void MainWindow::setupCharts()
+{
+    m_pdrPointsShown = -1;
+    m_throughputPointsShown = -1;
+    m_delayPointsShown = -1;
+    m_pdrSeries->clear();
+    m_throughputSeries->clear();
+    m_delaySeries->clear();
+
+    double start = m_engine->startTime();
+    double end = m_engine->endTime();
+    setAxisRanges(m_pdrSeries, start, end, 100.0);
+    setAxisRanges(m_throughputSeries, start, end, maxY(m_packetMetrics.throughputSeries()) * 1.15);
+    setAxisRanges(m_delaySeries, start, end, maxY(m_packetMetrics.delaySeries()) * 1.15);
+
+    m_chartsRow->setVisible(m_packetMetrics.hasPackets());
 }
 
 void MainWindow::buildScene()
@@ -514,6 +744,14 @@ void MainWindow::buildScene()
     m_selectedLinksItem = m_scene->addPath(QPainterPath(), selectedLinkPen);
     m_selectedLinksItem->setZValue(0.5);
     m_selectedLinksItem->setAcceptedMouseButtons(Qt::NoButton);
+
+    // Packets are drawn above the nodes so they stay visible
+    m_packetsItem = m_scene->addPath(QPainterPath(), Qt::NoPen, QBrush(QColor("#4ade80")));
+    m_packetsItem->setZValue(2);
+    m_packetsItem->setAcceptedMouseButtons(Qt::NoButton);
+    m_lostPacketsItem = m_scene->addPath(QPainterPath(), Qt::NoPen, QBrush(QColor("#f87171")));
+    m_lostPacketsItem->setZValue(2);
+    m_lostPacketsItem->setAcceptedMouseButtons(Qt::NoButton);
 
     // One range circle and one NodeItem per node ID found in the CSV
     const QList<int> ids = m_engine->nodeIds();
@@ -586,7 +824,112 @@ void MainWindow::updateNetwork(double time)
     m_selectedLinksItem->setPath(selectedLinks);
     m_linkCountLabel->setText(QString::number(links.size()));
 
+    updatePackets(time, positions);
     updateInfoPanel(time);
+}
+
+void MainWindow::updatePackets(double time, const QMap<int, QPointF> &positions)
+{
+    QPainterPath delivered;
+    QPainterPath lost;
+
+    if (m_showPacketsCheck->isChecked() && m_packetMetrics.hasPackets()) {
+        double speed = m_speedCombo->currentData().toDouble();
+        double minTravelTime = PacketMinVisibleSeconds * speed; // in simulation seconds
+
+        const QVector<PacketSample> &packets = m_packetMetrics.packets();
+        const QVector<VisiblePacket> visible = m_packetMetrics.visiblePacketsAt(time, minTravelTime);
+        for (const VisiblePacket &entry : visible) {
+            const PacketSample &packet = packets[entry.index];
+            if (!positions.contains(packet.source) || !positions.contains(packet.destination)) {
+                continue;
+            }
+
+            QPointF from = toScenePoint(positions.value(packet.source));
+            QPointF to = toScenePoint(positions.value(packet.destination));
+            if (packet.received) {
+                QPointF at = from + (to - from) * entry.progress;
+                delivered.addEllipse(at, PacketDotRadius, PacketDotRadius);
+            } else {
+                // A lost packet never arrives: it only gets halfway, then disappears
+                QPointF at = from + (to - from) * (0.5 * entry.progress);
+                lost.addEllipse(at, PacketDotRadius, PacketDotRadius);
+            }
+        }
+    }
+
+    m_packetsItem->setPath(delivered);
+    m_lostPacketsItem->setPath(lost);
+}
+
+static QString formatThroughput(double kbps)
+{
+    if (kbps >= 1000.0) {
+        return QString::number(kbps / 1000.0, 'f', 2) + " Mbps";
+    }
+    return QString::number(kbps, 'f', 1) + " kbps";
+}
+
+void MainWindow::updateMetrics(double time)
+{
+    if (!m_packetMetrics.hasPackets()) {
+        const QList<QLabel *> metricLabels = {m_pdrLabel, m_throughputLabel, m_delayLabel,
+                                              m_sentLabel, m_receivedLabel, m_lostLabel};
+        for (QLabel *label : metricLabels) {
+            label->setText("–");
+        }
+        m_packetInfoLabel->setText("No packets.csv found next to the mobility CSV.");
+        return;
+    }
+
+    MetricsSnapshot metrics = m_packetMetrics.snapshotAt(time);
+    m_pdrLabel->setText(QString::number(metrics.pdrPercent, 'f', 1) + " %");
+    m_throughputLabel->setText(formatThroughput(metrics.throughputKbps));
+    m_delayLabel->setText(QString::number(metrics.averageDelayMs, 'f', 2) + " ms");
+    m_sentLabel->setText(QString::number(metrics.sent));
+    m_receivedLabel->setText(QString::number(metrics.received));
+    m_lostLabel->setText(QString::number(metrics.lost));
+
+    QString info = QString("In flight: %1").arg(metrics.inFlight);
+    int last = m_packetMetrics.lastDeliveredAt(time);
+    if (last >= 0) {
+        const PacketSample &packet = m_packetMetrics.packets()[last];
+        info += QString("     Last delivered: packet %1 (flow %2), node %3 → node %4, "
+                        "sent %5 s, delay %6 ms, %7 bytes")
+                    .arg(packet.packetId)
+                    .arg(packet.flowId)
+                    .arg(packet.source)
+                    .arg(packet.destination)
+                    .arg(QString::number(packet.sendTime, 'f', 3))
+                    .arg(QString::number(1000.0 * (packet.receiveTime - packet.sendTime), 'f', 2))
+                    .arg(packet.sizeBytes);
+    }
+    m_packetInfoLabel->setText(info);
+
+    updateCharts(time);
+}
+
+// Shows the points of a graph up to 'time'. 'shown' remembers the last count so
+// the series is only replaced when a new point appears.
+static void showSeriesUpTo(QLineSeries *series, const QVector<QPointF> &points, double time,
+                           int &shown)
+{
+    int count = 0;
+    while (count < points.size() && points[count].x() <= time) {
+        count++;
+    }
+    if (count != shown) {
+        series->replace(points.mid(0, count));
+        shown = count;
+    }
+}
+
+void MainWindow::updateCharts(double time)
+{
+    showSeriesUpTo(m_pdrSeries, m_packetMetrics.pdrSeries(), time, m_pdrPointsShown);
+    showSeriesUpTo(m_throughputSeries, m_packetMetrics.throughputSeries(), time,
+                   m_throughputPointsShown);
+    showSeriesUpTo(m_delaySeries, m_packetMetrics.delaySeries(), time, m_delayPointsShown);
 }
 
 void MainWindow::updateInfoPanel(double time)
@@ -618,6 +961,15 @@ void MainWindow::updateInfoPanel(double time)
         neighborIds.append(QString::number(id));
     }
     m_infoNeighborList->setText(neighborIds.isEmpty() ? "None (isolated)" : neighborIds.join(", "));
+
+    if (m_packetMetrics.hasPackets()) {
+        m_infoPacketsSent->setText(QString::number(m_packetMetrics.sentByNode(m_selectedNodeId, time)));
+        m_infoPacketsReceived->setText(
+            QString::number(m_packetMetrics.receivedByNode(m_selectedNodeId, time)));
+    } else {
+        m_infoPacketsSent->setText("–");
+        m_infoPacketsReceived->setText("–");
+    }
 }
 
 QPointF MainWindow::toScenePoint(const QPointF &simPosition) const
@@ -644,6 +996,7 @@ void MainWindow::setControlsEnabled(bool enabled)
     m_timelineSlider->setEnabled(enabled);
     m_rangeSpinBox->setEnabled(enabled);
     m_showAllRangesCheck->setEnabled(enabled);
+    m_showPacketsCheck->setEnabled(enabled);
 }
 
 void MainWindow::openCsvDialog()
@@ -659,6 +1012,7 @@ void MainWindow::openCsvDialog()
 void MainWindow::onTimeChanged(double time)
 {
     updateNetwork(time);
+    updateMetrics(time);
 
     m_timeLabel->setText(formatTime(time));
     m_sliderTimeLabel->setText(formatTime(time));

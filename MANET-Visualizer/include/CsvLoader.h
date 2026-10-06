@@ -14,16 +14,34 @@ struct MobilitySample
     double y = 0.0; // NS-3 Y coordinate in metres
 };
 
-// Reads and parses the NS-3 node mobility CSV. It does nothing else.
+// One application packet from the NS-3 packets CSV.
+struct PacketSample
+{
+    qint64 packetId = 0;
+    int flowId = -1;
+    int source = 0;      // node that sent the packet
+    int destination = 0; // node the packet was addressed to
+    double sendTime = 0.0;     // seconds
+    double receiveTime = -1.0; // seconds, -1 if the packet was lost
+    int sizeBytes = 0;
+    bool received = false;
+};
+
+// Reads and parses the NS-3 CSV files. It does nothing else.
 //
 // Columns are found by their header name, so their order does not matter.
-// Required: time, node_id (or nodeId / node), x, y. Other columns are ignored.
+// Mobility CSV - required: time, node_id (or nodeId / node), x, y.
+// Packets CSV  - required: source, destination, send_time, and status or receive_time.
+//                optional: packet_id, flow_id, size_bytes.
+// Other columns are ignored.
 class CsvLoader
 {
 public:
-    bool load(const QString &filePath);
+    bool load(const QString &filePath); // mobility CSV
+    bool loadPackets(const QString &filePath);
 
     const QVector<MobilitySample> &samples() const;
+    const QVector<PacketSample> &packets() const;
     QString errorString() const;
     int skippedLines() const;
 
@@ -32,6 +50,7 @@ private:
     static int findColumn(const QStringList &header, const QStringList &acceptedNames);
 
     QVector<MobilitySample> m_samples;
+    QVector<PacketSample> m_packets;
     QString m_error;
     int m_skippedLines = 0;
 };

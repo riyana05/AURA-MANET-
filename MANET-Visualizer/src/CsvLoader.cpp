@@ -76,9 +76,113 @@ bool CsvLoader::load(const QString &filePath)
     return true;
 }
 
+bool CsvLoader::loadPackets(const QString &filePath)
+{
+    m_packets.clear();
+    m_error.clear();
+    m_skippedLines = 0;
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        m_error = QString("Could not open %1:\n%2").arg(filePath, file.errorString());
+        return false;
+    }
+
+    QTextStream in(&file);
+    if (in.atEnd()) {
+        m_error = "The packets CSV file is empty.";
+        return false;
+    }
+
+    QStringList header = splitCsvLine(in.readLine());
+    int sourceColumn = findColumn(header, {"source", "src", "source_node"});
+    int destinationColumn = findColumn(header, {"destination", "dst", "destination_node"});
+    int sendColumn = findColumn(header, {"send_time", "sendtime", "tx_time"});
+    int receiveColumn = findColumn(header, {"receive_time", "receivetime", "rx_time"});
+    int statusColumn = findColumn(header, {"status"});
+    int idColumn = findColumn(header, {"packet_id", "packetid", "id"});
+    int flowColumn = findColumn(header, {"flow_id", "flowid", "flow"});
+    int sizeColumn = findColumn(header, {"size_bytes", "size", "bytes"});
+
+    if (sourceColumn < 0 || destinationColumn < 0 || sendColumn < 0
+        || (statusColumn < 0 && receiveColumn < 0)) {
+        m_error = QString("The packets CSV header must contain source, destination, send_time "
+                          "and status or receive_time columns.\nFound: %1")
+                      .arg(header.join(", "));
+        return false;
+    }
+
+    int rowNumber = 0;
+    while (!in.atEnd()) {
+        QString line = in.readLine().trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+        rowNumber++;
+
+        // Missing columns at the end of a line are treated as empty
+        QStringList fields = splitCsvLine(line);
+        while (fields.size() < header.size()) {
+            fields.append(QString());
+        }
+
+        bool sourceOk = false;
+        bool destinationOk = false;
+        bool sendOk = false;
+
+        PacketSample packet;
+        packet.source = fields[sourceColumn].toInt(&sourceOk);
+        packet.destination = fields[destinationColumn].toInt(&destinationOk);
+        packet.sendTime = fields[sendColumn].toDouble(&sendOk);
+        if (!sourceOk || !destinationOk || !sendOk) {
+            m_skippedLines++;
+            continue;
+        }
+
+        packet.packetId = idColumn >= 0 ? fields[idColumn].toLongLong() : rowNumber;
+        packet.flowId = flowColumn >= 0 ? fields[flowColumn].toInt() : -1;
+        packet.sizeBytes = sizeColumn >= 0 ? fields[sizeColumn].toInt() : 0;
+
+        bool receiveOk = false;
+        double receiveTime = -1.0;
+        if (receiveColumn >= 0 && !fields[receiveColumn].isEmpty()) {
+            receiveTime = fields[receiveColumn].toDouble(&receiveOk);
+        }
+
+        if (statusColumn >= 0) {
+            packet.received = fields[statusColumn].toLower() == "received";
+        } else {
+            packet.received = receiveOk;
+        }
+
+        if (packet.received) {
+            // A delivered packet must have a valid receive time
+            if (!receiveOk || receiveTime < packet.sendTime) {
+                m_skippedLines++;
+                continue;
+            }
+            packet.receiveTime = receiveTime;
+        }
+
+        m_packets.append(packet);
+    }
+
+    if (m_packets.isEmpty()) {
+        m_error = "No valid packet rows were found in the CSV.";
+        return false;
+    }
+
+    return true;
+}
+
 const QVector<MobilitySample> &CsvLoader::samples() const
 {
     return m_samples;
+}
+
+const QVector<PacketSample> &CsvLoader::packets() const
+{
+    return m_packets;
 }
 
 QString CsvLoader::errorString() const
