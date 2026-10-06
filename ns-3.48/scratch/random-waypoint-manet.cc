@@ -18,11 +18,13 @@
 #include "ns3/olsr-helper.h"
 #include "ns3/wifi-module.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -44,6 +46,28 @@ struct SimConfig
     std::string experimentId = "EXP_001";
 };
 
+// Application-level settings of every UDP flow
+static const uint32_t kPacketSizeBytes = 1024;
+static const char* kFlowDataRate = "64kbps";
+
+// One UDP flow: OnOff source -> PacketSink
+struct FlowInfo
+{
+    uint32_t source = 0;
+    uint32_t destination = 0;
+    double startTime = 0.0;
+};
+
+// One application packet, from the moment it is sent until it is received (if ever)
+struct PacketRecord
+{
+    uint64_t packetId = 0; // ns-3 packet UID, kept by every copy of the packet
+    uint32_t flowId = 0;
+    double sendTime = 0.0;
+    double receiveTime = -1.0; // -1 = not received
+    uint32_t sizeBytes = 0;
+};
+
 class RandomWaypointManet
 {
   public:
@@ -60,7 +84,15 @@ class RandomWaypointManet
     void RecordMetrics();
     void EmitSyntheticRouteEvent();
     void WriteMetaFile();
+    void WritePacketsCsv();
     void CloseFiles();
+    void OnPacketSent(std::string flowContext, Ptr<const Packet> packet);
+    void OnPacketReceived(std::string flowContext,
+                          Ptr<const Packet> packet,
+                          const Address& from,
+                          const Address& to);
+    std::vector<std::vector<bool>> ComputeLinks() const;
+    uint32_t CountConnectedComponents(const std::vector<std::vector<bool>>& links) const;
     std::string ToNeighborsCsv(const std::vector<uint32_t>& neighbors) const;
 
     SimConfig m_cfg;
@@ -69,6 +101,22 @@ class RandomWaypointManet
     Ipv4InterfaceContainer m_interfaces;
     std::vector<ApplicationContainer> m_sinkApps;
     std::vector<ApplicationContainer> m_sourceApps;
+    std::vector<FlowInfo> m_flows;
+
+    // Packet tracing
+    std::vector<PacketRecord> m_packets;
+    std::map<uint64_t, size_t> m_packetIndexById; // packet UID -> index in m_packets
+    uint64_t m_packetsSent = 0;
+    uint64_t m_packetsReceived = 0;
+    uint64_t m_unmatchedReceptions = 0;
+    double m_totalDelay = 0.0; // seconds, over all received packets
+
+    // Reset after every RecordMetrics() call (one-second window)
+    uint64_t m_windowRxBytes = 0;
+    uint64_t m_windowRxPackets = 0;
+    double m_windowDelay = 0.0;
+
+    std::vector<std::vector<bool>> m_previousLinks;
 
     std::ofstream m_nodeMobilityCsv;
     std::ofstream m_networkMetricsCsv;
@@ -236,12 +284,28 @@ RandomWaypointManet::InstallTraffic()
 
         OnOffHelper onOff("ns3::UdpSocketFactory",
                           Address(InetSocketAddress(m_interfaces.GetAddress(dst), sinkPort)));
-        onOff.SetConstantRate(DataRate("64kbps"), 1024);
+        onOff.SetConstantRate(DataRate(kFlowDataRate), kPacketSizeBytes);
 
+        double startTime = 1.0 + 0.25 * i;
         ApplicationContainer sourceApp = onOff.Install(m_nodes.Get(src));
-        sourceApp.Start(Seconds(1.0 + 0.25 * i));
+        sourceApp.Start(Seconds(startTime));
         sourceApp.Stop(Seconds(m_cfg.duration));
         m_sourceApps.push_back(sourceApp);
+
+        FlowInfo flow;
+        flow.source = src;
+        flow.destination = dst;
+        flow.startTime = startTime;
+        m_flows.push_back(flow);
+
+        // The trace context carries the flow index so the callbacks know which flow it is
+        std::string flowContext = std::to_string(i);
+        sourceApp.Get(0)->TraceConnect("Tx",
+                                       flowContext,
+                                       MakeCallback(&RandomWaypointManet::OnPacketSent, this));
+        sinkApp.Get(0)->TraceConnect("RxWithAddresses",
+                                     flowContext,
+                                     MakeCallback(&RandomWaypointManet::OnPacketReceived, this));
     }
 }
 
@@ -286,70 +350,210 @@ RandomWaypointManet::RecordMobility()
 }
 
 void
+RandomWaypointManet::OnPacketSent(std::string flowContext, Ptr<const Packet> packet)
+{
+    PacketRecord record;
+    record.packetId = packet->GetUid();
+    record.flowId = static_cast<uint32_t>(std::stoul(flowContext));
+    record.sendTime = Simulator::Now().GetSeconds();
+    record.sizeBytes = packet->GetSize();
+
+    m_packetIndexById[record.packetId] = m_packets.size();
+    m_packets.push_back(record);
+    m_packetsSent++;
+}
+
+void
+RandomWaypointManet::OnPacketReceived(std::string flowContext,
+                                      Ptr<const Packet> packet,
+                                      const Address& from,
+                                      const Address& to)
+{
+    auto found = m_packetIndexById.find(packet->GetUid());
+    if (found == m_packetIndexById.end())
+    {
+        m_unmatchedReceptions++;
+        return;
+    }
+
+    PacketRecord& record = m_packets[found->second];
+    if (record.receiveTime >= 0.0)
+    {
+        return; // duplicate reception, already counted
+    }
+
+    record.receiveTime = Simulator::Now().GetSeconds();
+    double delay = record.receiveTime - record.sendTime;
+
+    m_packetsReceived++;
+    m_totalDelay += delay;
+    m_windowRxBytes += packet->GetSize();
+    m_windowRxPackets++;
+    m_windowDelay += delay;
+}
+
+std::vector<std::vector<bool>>
+RandomWaypointManet::ComputeLinks() const
+{
+    std::vector<std::vector<bool>> links(m_cfg.nodes, std::vector<bool>(m_cfg.nodes, false));
+
+    for (uint32_t i = 0; i < m_cfg.nodes; ++i)
+    {
+        Vector pos = m_nodes.Get(i)->GetObject<MobilityModel>()->GetPosition();
+        for (uint32_t j = i + 1; j < m_cfg.nodes; ++j)
+        {
+            Vector otherPos = m_nodes.Get(j)->GetObject<MobilityModel>()->GetPosition();
+            double dx = pos.x - otherPos.x;
+            double dy = pos.y - otherPos.y;
+            if (dx * dx + dy * dy <= m_cfg.txRange * m_cfg.txRange)
+            {
+                links[i][j] = true;
+                links[j][i] = true;
+            }
+        }
+    }
+    return links;
+}
+
+uint32_t
+RandomWaypointManet::CountConnectedComponents(const std::vector<std::vector<bool>>& links) const
+{
+    std::vector<bool> visited(m_cfg.nodes, false);
+    uint32_t components = 0;
+
+    for (uint32_t start = 0; start < m_cfg.nodes; ++start)
+    {
+        if (visited[start])
+        {
+            continue;
+        }
+
+        // Depth-first search from 'start' marks its whole component
+        components++;
+        std::vector<uint32_t> stack;
+        stack.push_back(start);
+        visited[start] = true;
+        while (!stack.empty())
+        {
+            uint32_t node = stack.back();
+            stack.pop_back();
+            for (uint32_t other = 0; other < m_cfg.nodes; ++other)
+            {
+                if (links[node][other] && !visited[other])
+                {
+                    visited[other] = true;
+                    stack.push_back(other);
+                }
+            }
+        }
+    }
+    return components;
+}
+
+void
 RandomWaypointManet::RecordMetrics()
 {
     const double now = Simulator::Now().GetSeconds();
 
-    double totalRxBytes = 0.0;
-    for (size_t i = 0; i < m_sinkApps.size(); ++i)
-    {
-        Ptr<PacketSink> sink = DynamicCast<PacketSink>(m_sinkApps[i].Get(0));
-        if (sink)
-        {
-            totalRxBytes += sink->GetTotalRx();
-        }
-    }
-
-    const double expectedBytesPerFlow = (64e3 / 8.0) * m_cfg.duration;
-    double totalExpectedBytes = expectedBytesPerFlow * std::max(1ul, m_sinkApps.size());
+    // PDR so far. Packets still in flight count as not received yet.
     double pdr = 0.0;
-    if (totalExpectedBytes > 0.0)
+    if (m_packetsSent > 0)
     {
-        pdr = totalRxBytes / totalExpectedBytes;
+        pdr = static_cast<double>(m_packetsReceived) / static_cast<double>(m_packetsSent);
+    }
+    double packetLoss = (m_packetsSent > 0) ? 1.0 - pdr : 0.0;
+
+    // Throughput over the last one-second window (application payload)
+    double throughputKbps = (m_windowRxBytes * 8.0) / 1000.0;
+
+    double averageDelayMs = 0.0;
+    if (m_packetsReceived > 0)
+    {
+        averageDelayMs = 1000.0 * m_totalDelay / static_cast<double>(m_packetsReceived);
     }
 
-    double throughputKbps = (totalRxBytes * 8.0) / (1000.0 * m_cfg.duration);
-    double avgDegree = 0.0;
-    double totalEdges = 0.0;
-
+    // Topology
+    std::vector<std::vector<bool>> links = ComputeLinks();
+    uint32_t linkCount = 0;
+    uint32_t linkBreaks = 0;
     for (uint32_t i = 0; i < m_cfg.nodes; ++i)
     {
-        uint32_t degree = 0;
-        Vector pos = m_nodes.Get(i)->GetObject<MobilityModel>()->GetPosition();
-
-        for (uint32_t j = 0; j < m_cfg.nodes; ++j)
+        for (uint32_t j = i + 1; j < m_cfg.nodes; ++j)
         {
-            if (i == j)
+            if (links[i][j])
             {
-                continue;
+                linkCount++;
             }
-
-            Vector otherPos = m_nodes.Get(j)->GetObject<MobilityModel>()->GetPosition();
-            double dx = pos.x - otherPos.x;
-            double dy = pos.y - otherPos.y;
-            double dist2 = dx * dx + dy * dy;
-            if (dist2 <= m_cfg.txRange * m_cfg.txRange)
+            if (!m_previousLinks.empty() && m_previousLinks[i][j] && !links[i][j])
             {
-                degree++;
+                linkBreaks++;
             }
         }
-
-        totalEdges += degree;
     }
+    m_previousLinks = links;
 
-    avgDegree = totalEdges / static_cast<double>(m_cfg.nodes);
-    const double maxPossibleEdges = static_cast<double>(m_cfg.nodes) * (m_cfg.nodes - 1) / 2.0;
-    double networkDensity = 0.0;
-    if (maxPossibleEdges > 0.0)
+    uint32_t activeFlows = 0;
+    for (const FlowInfo& flow : m_flows)
     {
-        networkDensity = (totalEdges / 2.0) / maxPossibleEdges;
+        if (flow.startTime <= now)
+        {
+            activeFlows++;
+        }
     }
 
-    double packetLoss = std::max(0.0, 1.0 - pdr);
+    const double maxPossibleLinks = static_cast<double>(m_cfg.nodes) * (m_cfg.nodes - 1) / 2.0;
+    double networkDensity = (maxPossibleLinks > 0.0) ? linkCount / maxPossibleLinks : 0.0;
+    double averageDegree = 2.0 * linkCount / static_cast<double>(m_cfg.nodes);
 
-    m_networkMetricsCsv << now << "," << pdr << "," << throughputKbps << ",0.0," << packetLoss
-                        << ",0,0," << m_sinkApps.size() << ",1.0," << networkDensity << ","
-                        << avgDegree << "\n";
+    m_networkMetricsCsv << now << "," << m_packetsSent << "," << m_packetsReceived << "," << pdr
+                        << "," << throughputKbps << "," << averageDelayMs << ",";
+    // Delay of the packets received in this window; empty if none arrived
+    if (m_windowRxPackets > 0)
+    {
+        m_networkMetricsCsv << 1000.0 * m_windowDelay / static_cast<double>(m_windowRxPackets);
+    }
+    m_networkMetricsCsv << "," << packetLoss << "," << linkBreaks << "," << activeFlows << ","
+                        << CountConnectedComponents(links) << "," << networkDensity << ","
+                        << averageDegree << "\n";
+
+    m_windowRxBytes = 0;
+    m_windowRxPackets = 0;
+    m_windowDelay = 0.0;
+}
+
+void
+RandomWaypointManet::WritePacketsCsv()
+{
+    std::ofstream csv("MetricsOutput/packets.csv", std::ios::out);
+    csv << "packet_id,flow_id,source,destination,send_time,receive_time,delay_ms,size_bytes,status\n";
+    csv << std::fixed;
+
+    for (const PacketRecord& packet : m_packets)
+    {
+        const FlowInfo& flow = m_flows[packet.flowId];
+        csv << packet.packetId << "," << packet.flowId << "," << flow.source << ","
+            << flow.destination << "," << std::setprecision(6) << packet.sendTime << ",";
+
+        if (packet.receiveTime >= 0.0)
+        {
+            csv << packet.receiveTime << "," << std::setprecision(3)
+                << 1000.0 * (packet.receiveTime - packet.sendTime) << "," << packet.sizeBytes
+                << ",received\n";
+        }
+        else
+        {
+            // Never reached the sink before the simulation ended
+            csv << ",," << packet.sizeBytes << ",lost\n";
+        }
+    }
+
+    if (m_unmatchedReceptions > 0)
+    {
+        std::cout << "Warning: " << m_unmatchedReceptions
+                  << " received packets could not be matched to a sent packet" << std::endl;
+    }
+    std::cout << "Packets: sent=" << m_packetsSent << ", received=" << m_packetsReceived
+              << std::endl;
 }
 
 void
@@ -378,6 +582,9 @@ RandomWaypointManet::WriteMetaFile()
     meta << "protocol=" << m_cfg.protocol << "\n";
     meta << "duration=" << m_cfg.duration << "\n";
     meta << "pause=" << m_cfg.pause << "\n";
+    meta << "flows=" << m_cfg.flows << "\n";
+    meta << "packet_size=" << kPacketSizeBytes << "\n";
+    meta << "flow_data_rate=" << kFlowDataRate << "\n";
     meta.close();
 }
 
@@ -408,9 +615,10 @@ RandomWaypointManet::Run()
     m_nodeMobilityCsv << "time,node_id,x,y,speed,neighbor_count,neighbors\n";
 
     m_networkMetricsCsv.open("MetricsOutput/network_metrics.csv", std::ios::out);
-    m_networkMetricsCsv << "time,PDR,throughput,average_delay,packet_loss,route_changes,"
-                       << "link_breaks,active_flows,connected_components,network_density,"
-                       << "average_node_degree\n";
+    m_networkMetricsCsv << "time,packets_sent,packets_received,PDR,throughput_kbps,"
+                        << "average_delay_ms,window_delay_ms,packet_loss,link_breaks,"
+                        << "active_flows,connected_components,network_density,"
+                        << "average_node_degree\n";
 
     m_routingEventsCsv.open("MetricsOutput/routing_events.csv", std::ios::out);
     m_routingEventsCsv << "time,event_type,source,destination,route,hop_count\n";
@@ -438,6 +646,7 @@ RandomWaypointManet::Run()
 
     Simulator::Stop(Seconds(m_cfg.duration));
     Simulator::Run();
+    WritePacketsCsv();
     Simulator::Destroy();
     CloseFiles();
 }

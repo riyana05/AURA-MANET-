@@ -6,3 +6,6 @@ range=100
 protocol=AODV
 duration=300
 pause=2
+flows=10
+packet_size=1024
+flow_data_rate=64kbps
