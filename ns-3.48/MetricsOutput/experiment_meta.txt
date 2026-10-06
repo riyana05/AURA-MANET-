@@ -1,0 +1,8 @@
+EXP_ID=EXP_001
+nodes=20
+speed=5 to 5 m/s
+area=500x500
+range=100
+protocol=AODV
+duration=300
+pause=2
