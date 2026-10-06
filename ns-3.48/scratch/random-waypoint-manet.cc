@@ -160,6 +160,10 @@ RandomWaypointManet::SetupWifi()
     YansWifiChannelHelper wifiChannel;
     wifiChannel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
     wifiChannel.AddPropagationLoss("ns3::FriisPropagationLossModel");
+    // Hard cut-off so the radio range really is txRange (Friis alone reaches far beyond it)
+    wifiChannel.AddPropagationLoss("ns3::RangePropagationLossModel",
+                                   "MaxRange",
+                                   DoubleValue(m_cfg.txRange));
     wifiPhy.SetChannel(wifiChannel.Create());
 
     WifiHelper wifi;

@@ -134,9 +134,9 @@ The GUI's values match NS-3's own `network_metrics.csv` for every second of the 
 
 Each packet is drawn as a dot moving from its source to its destination, using the nodes' positions at
 the current time. Delivered packets are green and lost packets are red. A lost packet only gets halfway, then disappears.
-The real delays are mostly about 1–5 ms, far too short to see, so a dot travels for
-`max(real delay, 0.4 s × playback speed)` of simulation time. Packets that waited a long time (e.g. during
-an AODV route discovery) visibly take longer. The CSV records only the endpoints, not the hops in between, so
+Most real delays are a few milliseconds, far too short to see, so a dot travels for
+`max(real delay, 0.4 s × playback speed)` of simulation time. Packets that waited a long time (AODV
+buffers packets for up to several seconds while it searches for a route) visibly take longer. The CSV records only the endpoints, not the hops in between, so
 dots move on a straight line.
 
 ### Graphs
