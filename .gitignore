@@ -1,0 +1,13 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+
+# Qt Creator / CMake user files
+CMakeLists.txt.user*
+*.autosave
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
