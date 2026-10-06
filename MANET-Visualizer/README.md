@@ -3,7 +3,9 @@
 Desktop app that plays back the node movement recorded by the NS-3 scenario in
 [`../ns-3.48/scratch/random-waypoint-manet.cc`](../ns-3.48/scratch/random-waypoint-manet.cc).
 
-**Current status: Phase 1:** moving nodes, Play / Pause / Reset, speed, timeline.
+**Current status: Phase 2.**
+- Phase 1: moving nodes, Play / Pause / Reset, speed, timeline
+- Phase 2: communication range, dynamic links, node selection, selected-node info panel
 
 ## Build and run (macOS)
 
@@ -28,7 +30,7 @@ The app reads `data/node_mobility.csv`. After re-running the NS-3 simulation, co
 cp ../ns-3.48/MetricsOutput/node_mobility.csv data/
 ```
 
-## CSV format (Phase 1)
+## CSV format
 
 ```
 time,node_id,x,y,speed,neighbor_count,neighbors
@@ -42,7 +44,7 @@ time,node_id,x,y,speed,neighbor_count,neighbors
 | `node_id` | Integer node ID (`nodeId` / `node` also accepted) | yes |
 | `x`, `y` | NS-3 position in metres, Y pointing up | yes |
 | `speed` | Node speed in m/s | no |
-| `neighbor_count`, `neighbors` | Nodes within transmission range (quoted list) | no (Phase 2) |
+| `neighbor_count`, `neighbors` | Nodes NS-3 found within its 100 m range (quoted list) | no, links are computed from X/Y instead (see below) |
 
 Columns are found by header name, so their order does not matter. Rows can be in any order.
 
@@ -64,3 +66,21 @@ Columns are found by header name, so their order does not matter. Rows can be in
 - **Scaling:** `minX/maxX/minY/maxY` come from the CSV. One scale factor is used for both axes so
   distances are not distorted. `sceneY = padding + (maxY − y) × scale` flips the Y axis, because NS-3 Y
   points up and screen Y points down. The view keeps the whole area fitted when the window is resized.
+
+## Phase 2: links and node information
+
+- **Communication range** is set in the left panel (default 100 m, the range used by the NS-3
+  scenario). Two nodes are linked when `distance(A, B) <= range`, which is the same rule the NS-3 script uses.
+  The range is stored in `SimulationEngine`, which provides `linksAt(time)` and `neighborsAt(node, time)`.
+- **Why not use the CSV `neighbors` column?** It only exists at whole-second timestamps and only for
+  100 m. Computing links from the interpolated positions keeps them in step with the moving nodes and
+  lets you change the range. At 100 m and whole-second times the computed neighbours match the CSV
+  column exactly (checked for all 6,020 rows).
+- **Links** are drawn with two `QGraphicsPathItem`s (one for all links, one in amber for links of the
+  selected node). Both paths are rebuilt every time the simulation time or range changes, so links
+  appear and disappear as nodes move.
+- **Range circles** (`QGraphicsEllipseItem`, one per node) show around the selected node. Tick
+  *Show range of every node* to show all of them.
+- **Selection:** click a node to select it (a white ring is drawn around it). Click empty space to deselect. The
+  right panel shows the node's ID, X/Y (metres), simulation time, neighbour count, neighbour IDs and range,
+  and updates live while the simulation plays.

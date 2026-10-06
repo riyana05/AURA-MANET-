@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
     app.setStyle("Fusion");
 
     MainWindow window;
-    window.resize(1280, 820);
+    window.resize(1440, 880);
     window.show();
 
     // Usage: MANETVisualizer [path/to/mobility.csv]

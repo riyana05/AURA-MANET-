@@ -19,6 +19,13 @@ struct TimedPosition
     QPointF position; // NS-3 coordinates in metres
 };
 
+// Two nodes that are within communication range of each other
+struct NodeLink
+{
+    int nodeA = 0;
+    int nodeB = 0;
+};
+
 // Owns the simulation clock and answers "where is node N at time T?".
 // It knows nothing about widgets or drawing.
 class SimulationEngine : public QObject
@@ -43,6 +50,13 @@ public:
     // Position of a node at any time, linearly interpolated between the
     // two nearest CSV timestamps.
     QPointF positionAt(int nodeId, double time) const;
+    QMap<int, QPointF> positionsAt(double time) const;
+
+    // Two nodes can communicate when distance(A, B) <= communication range
+    double communicationRange() const;
+    void setCommunicationRange(double metres);
+    QVector<NodeLink> linksAt(double time) const;
+    QList<int> neighborsAt(int nodeId, double time) const;
 
 public slots:
     void play();
@@ -60,12 +74,15 @@ private slots:
     void onTick();
 
 private:
+    bool isInRange(const QPointF &a, const QPointF &b) const;
+
     QMap<int, QVector<TimedPosition>> m_tracks; // nodeId -> positions sorted by time
     QRectF m_bounds;
     double m_startTime = 0.0;
     double m_endTime = 0.0;
     double m_currentTime = 0.0;
     double m_speed = 1.0;
+    double m_range = 100.0; // metres; the GUI can change it
 
     QTimer m_timer;
     QElapsedTimer m_clock; // measures real time between timer ticks

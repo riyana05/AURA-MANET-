@@ -136,6 +136,71 @@ QPointF SimulationEngine::positionAt(int nodeId, double time) const
     return before.position + (after.position - before.position) * fraction;
 }
 
+QMap<int, QPointF> SimulationEngine::positionsAt(double time) const
+{
+    QMap<int, QPointF> positions;
+    for (auto it = m_tracks.constBegin(); it != m_tracks.constEnd(); ++it) {
+        positions.insert(it.key(), positionAt(it.key(), time));
+    }
+    return positions;
+}
+
+double SimulationEngine::communicationRange() const
+{
+    return m_range;
+}
+
+void SimulationEngine::setCommunicationRange(double metres)
+{
+    if (metres >= 0.0) {
+        m_range = metres;
+    }
+}
+
+QVector<NodeLink> SimulationEngine::linksAt(double time) const
+{
+    QMap<int, QPointF> positions = positionsAt(time);
+    QList<int> ids = positions.keys();
+
+    // Check every pair of nodes once
+    QVector<NodeLink> links;
+    for (int i = 0; i < ids.size(); ++i) {
+        for (int j = i + 1; j < ids.size(); ++j) {
+            if (isInRange(positions[ids[i]], positions[ids[j]])) {
+                NodeLink link;
+                link.nodeA = ids[i];
+                link.nodeB = ids[j];
+                links.append(link);
+            }
+        }
+    }
+    return links;
+}
+
+QList<int> SimulationEngine::neighborsAt(int nodeId, double time) const
+{
+    QList<int> neighbors;
+    if (!m_tracks.contains(nodeId)) {
+        return neighbors;
+    }
+
+    QPointF position = positionAt(nodeId, time);
+    for (auto it = m_tracks.constBegin(); it != m_tracks.constEnd(); ++it) {
+        if (it.key() != nodeId && isInRange(position, positionAt(it.key(), time))) {
+            neighbors.append(it.key());
+        }
+    }
+    return neighbors;
+}
+
+bool SimulationEngine::isInRange(const QPointF &a, const QPointF &b) const
+{
+    // Compare squared distances to avoid a square root
+    double dx = a.x() - b.x();
+    double dy = a.y() - b.y();
+    return dx * dx + dy * dy <= m_range * m_range;
+}
+
 void SimulationEngine::play()
 {
     if (m_tracks.isEmpty() || m_timer.isActive()) {

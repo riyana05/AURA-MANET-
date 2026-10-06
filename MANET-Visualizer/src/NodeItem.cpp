@@ -1,5 +1,6 @@
 #include "NodeItem.h"
 
+#include <QCursor>
 #include <QFont>
 #include <QPainter>
 
@@ -11,13 +12,20 @@ NodeItem::NodeItem(int nodeId, const QColor &color, qreal radius)
     , m_color(color)
     , m_radius(radius)
 {
-    setZValue(1); // nodes are drawn above the grid
+    setZValue(1); // nodes are drawn above the grid, ranges and links
+    setFlag(QGraphicsItem::ItemIsSelectable);
+    setCursor(Qt::PointingHandCursor);
     setToolTip(QString("Node %1").arg(nodeId));
 }
 
 int NodeItem::nodeId() const
 {
     return m_nodeId;
+}
+
+QColor NodeItem::color() const
+{
+    return m_color;
 }
 
 QRectF NodeItem::boundingRect() const
@@ -39,6 +47,13 @@ void NodeItem::paint(QPainter *painter, const QStyleOptionGraphicsItem *option, 
     painter->setPen(Qt::NoPen);
     painter->setBrush(halo);
     painter->drawEllipse(QPointF(0, 0), m_radius * HaloScale, m_radius * HaloScale);
+
+    // Selection ring
+    if (isSelected()) {
+        painter->setPen(QPen(QColor("#f8fafc"), 3));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawEllipse(QPointF(0, 0), m_radius * 1.4, m_radius * 1.4);
+    }
 
     // Body
     painter->setPen(QPen(m_color.lighter(140), 2));
