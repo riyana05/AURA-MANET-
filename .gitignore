@@ -16,3 +16,6 @@ CMakeLists.txt.user*
 ns-3.48/build/
 ns-3.48/cmake-cache/
 ns-3.48/.lock-ns3_*
+
+# Qt visualizer build output
+MANET-Visualizer/build/
