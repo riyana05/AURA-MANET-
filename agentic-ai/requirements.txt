@@ -1,0 +1,24 @@
+# Orchestration / LLM
+langgraph>=0.2
+langchain-core>=0.3
+langchain-groq>=0.2
+
+# RAG
+faiss-cpu>=1.8
+sentence-transformers>=3.0
+pypdf>=4.0            # optional: ingest PDF research papers from rag/knowledge_base/
+
+# API
+fastapi>=0.111
+uvicorn[standard]>=0.30
+httpx>=0.27
+
+# Data / routing / config
+networkx>=3.3
+pandas>=2.2
+numpy>=1.26
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# Tests
+pytest>=8.0

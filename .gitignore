@@ -19,3 +19,14 @@ ns-3.48/.lock-ns3_*
 
 # Qt visualizer build output
 MANET-Visualizer/build/
+
+# Python / agentic-ai
+__pycache__/
+*.pyc
+.venv/
+venv/
+agentic-ai/.env
+agentic-ai/rag/index/
+agentic-ai/runs/
+agentic-ai/results/
+.pytest_cache/

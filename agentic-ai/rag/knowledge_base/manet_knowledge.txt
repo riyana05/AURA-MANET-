@@ -1,0 +1,150 @@
+MANET AND AODV ROUTING KNOWLEDGE BASE
+======================================
+
+## 1. MOBILE AD HOC NETWORKS (MANETs) — OVERVIEW
+
+A Mobile Ad Hoc Network (MANET) is a self-configuring, infrastructure-less network of mobile devices connected wirelessly. Each device (node) in a MANET acts simultaneously as a host and a router, forwarding packets on behalf of other nodes. MANETs operate without any fixed base station or centralised administration, making them ideal for emergency response, military operations, disaster recovery, and vehicular communications where infrastructure may be unavailable or destroyed. The topology of a MANET changes dynamically as nodes move, join, or leave, which introduces significant challenges for routing, security, and resource management.
+
+The fundamental characteristic of a MANET is its decentralisation. Because no node has global knowledge of the network, routing protocols must discover and maintain paths in a distributed fashion. Nodes communicate within a radio transmission range, and links between two nodes exist only when they are within each other's range. When nodes move out of range, links break and routes must be repaired or re-discovered. This transient connectivity distinguishes MANETs from wired or infrastructure wireless networks.
+
+Energy is a critical resource in MANETs. Nodes are typically battery-powered, so protocol designers must minimise control overhead, avoid unnecessary transmissions, and balance routing load across nodes to extend network lifetime. Energy-aware routing metrics combine link quality with residual battery power to prefer paths that do not drain critical nodes.
+
+## 2. AODV — AD HOC ON-DEMAND DISTANCE VECTOR ROUTING
+
+AODV (Ad Hoc On-Demand Distance Vector) is a reactive routing protocol defined in RFC 3561. It discovers routes only when a source node needs to communicate with a destination, avoiding the overhead of maintaining routing tables for all possible paths at all times. AODV uses sequence numbers to guarantee loop-free and up-to-date routes.
+
+### 2.1 Sequence Numbers
+
+Every AODV node maintains a monotonically increasing destination sequence number (DSN). The DSN is incremented whenever the node generates a new route discovery request. A higher sequence number always indicates a more recent route. When two routes to the same destination are compared, the route with the higher destination sequence number is preferred. If sequence numbers are equal, the route with fewer hops is chosen. Sequence numbers prevent routing loops and stale-route usage.
+
+### 2.2 Route Request (RREQ) Packet
+
+When a source node S needs a route to destination D and has no valid entry in its routing table, it broadcasts a Route REQuest (RREQ) packet. The RREQ contains: source address, source sequence number, destination address, destination sequence number (the last known DSN for D, or zero if unknown), a unique broadcast ID (RREQ_ID), and a hop count (initially 0). Each intermediate node that receives the RREQ first checks whether it has a valid, unexpired route to D with a destination sequence number >= the one in the RREQ. If so, it unicasts a Route REPly (RREP) back to S along the reverse path. Otherwise it increments the hop count, records a reverse route entry back to S (so it can forward the RREP), and re-broadcasts the RREQ. To prevent broadcast storms, each node discards duplicate RREQs identified by (source address, RREQ_ID). The time-to-live (TTL) field in the IP header limits the propagation range of RREQs; AODV uses an expanding ring search to progressively increase TTL until a route is found.
+
+### 2.3 Route Reply (RREP) Packet
+
+A Route REPly (RREP) is generated either by the destination D itself or by an intermediate node with a fresh enough route to D. The RREP travels unicast back along the reverse path recorded by RREQ propagation. Each node that forwards the RREP creates a forward route entry to D in its routing table, specifying the next hop, hop count, destination sequence number, and an expiry time. The source S receives the RREP and can begin forwarding data packets to D along the now-established route. AODV supports multiple RREPs; if S receives a later RREP with a higher sequence number or fewer hops, it updates its routing table accordingly.
+
+### 2.4 Route Error (RERR) Packet
+
+When a node detects that a next-hop link on an active route has broken (typically via a failed transmission or Hello message timeout), it generates a Route ERRor (RERR) packet. The RERR lists all destinations that are now unreachable due to the broken link. The RERR is propagated upstream (toward all sources that use the broken route) using the precursor lists maintained in routing table entries. Upon receiving a RERR, each upstream node marks the affected routes as invalid and propagates the RERR further if it has precursors for those routes. Sources that need the broken destination must initiate a fresh RREQ.
+
+### 2.5 Hello Messages and Neighbour Detection
+
+AODV nodes optionally broadcast periodic Hello messages (special RREPs with TTL=1 and hop count=0) to inform neighbours of their presence. If a node does not hear a Hello from a neighbour within a configured interval (ALLOWED_HELLO_LOSS × HELLO_INTERVAL), it assumes the link has broken and triggers RERR propagation for all routes using that neighbour as next hop. Hello-based link detection is an alternative to passive link-layer acknowledgements (LLACK) but generates additional control traffic.
+
+### 2.6 Routing Table Structure
+
+Each AODV routing table entry contains: destination IP address, destination sequence number, valid/invalid flag, next hop, hop count, list of precursors (nodes that route traffic through this node to reach the destination), expiry/lifetime timestamp. Entries are expired and deleted after ROUTE_DELETE_PERIOD if not refreshed. Active routes are refreshed when data traffic flows through them.
+
+## 3. MANET CHALLENGES
+
+### 3.1 Node Mobility and Topology Volatility
+
+The most fundamental challenge in MANETs is dynamic topology. Nodes move continuously, causing links to appear and disappear unpredictably. Fast-moving nodes cause frequent link breaks, which force repeated route re-discoveries, increasing control overhead and degrading application-layer performance. Mobility models such as Random Waypoint, Gauss-Markov, and Reference Point Group Mobility (RPGM) simulate different movement patterns. High mobility exacerbates the stale-route problem: a route that was valid milliseconds ago may already be broken. Protocols must balance responsiveness (quick rerouting) against overhead (excessive RREQ flooding).
+
+### 3.2 Network Partitioning
+
+A MANET can split into multiple disconnected subsets when intermediate nodes move out of range simultaneously. Partitioned subnets cannot communicate until nodes move back into contact or a relay path is restored. Partitioning drastically reduces packet delivery ratio (PDR) for flows whose source and destination reside in different partitions. Detecting partitions from local routing tables is difficult; global connectivity requires topology aggregation, which is expensive. Delay-Tolerant Networking (DTN) and store-carry-forward approaches (Epidemic Routing) address intermittent connectivity at the cost of buffer usage and latency.
+
+### 3.3 Hidden Terminal Problem
+
+The hidden terminal problem occurs when two nodes A and C, both in range of an intermediate node B, are out of range of each other. A and C cannot sense each other's transmissions, so they may transmit simultaneously, causing a collision at B. IEEE 802.11 addresses this with RTS/CTS (Request to Send/Clear to Send) handshaking, but RTS/CTS adds overhead and does not fully eliminate the problem. Hidden terminals degrade throughput and increase packet loss, particularly in dense networks.
+
+### 3.4 Energy Constraints
+
+Nodes run on batteries with limited capacity. Radio transmission and reception consume the most energy in a typical sensor or mobile node. Routing protocols that flood large numbers of control packets (like proactive protocols OLSR/DSDV) drain batteries faster. AODV's on-demand approach reduces control overhead but still floods RREQs across the network. Energy-efficient routing selects paths that minimise total energy consumption or maximise minimum residual energy. When a battery-critical node fails mid-route, it can partition the network unexpectedly, causing cascading route failures.
+
+### 3.5 Scalability
+
+As the number of nodes grows, RREQ floods become more expensive. The route discovery latency also increases with network diameter. Hierarchical and cluster-based protocols address scalability by electing cluster heads to aggregate routing information and reduce flooding scope. However, cluster maintenance overhead can itself be significant in highly mobile networks.
+
+## 4. COMMON FAULT TYPES IN MANETs
+
+### 4.1 Black Hole Attack
+
+In a black hole attack, a malicious node advertises falsely high sequence numbers in RREP packets, attracting all data traffic toward itself. It then silently drops all forwarded packets instead of relaying them. The attack causes a severe and sudden drop in PDR for affected flows. Detection methods include: promiscuous mode monitoring (legitimate neighbours check whether the suspected node actually forwards packets), multi-path route verification, and trust/reputation systems that penalise nodes with high drop rates. A cooperative black hole attack involves multiple colluding malicious nodes that form a black hole zone in the network, making detection harder.
+
+### 4.2 Link Breaks
+
+Link breaks occur when two previously connected nodes move out of radio range, or when interference degrades the link below the minimum signal threshold. In AODV, link breaks trigger RERR propagation and new RREQ floods. Frequent link breaks substantially increase control overhead (RREQ/RERR storms) and cause intermittent packet loss during route re-establishment. Local repair mechanisms in AODV allow an intermediate node to attempt a local RREQ for the broken link before notifying the source, reducing recovery latency at the cost of potentially choosing a suboptimal route.
+
+### 4.3 Congestion
+
+Congestion arises when the aggregate traffic load exceeds channel capacity or buffer capacity at intermediate nodes. Symptoms include increasing end-to-end delay, rising queue drop rates, and decreasing effective throughput. In IEEE 802.11 MACs, congestion manifests as increased backoff times and higher collision rates. Cross-layer congestion control mechanisms signal the network layer to reduce injection rate. AODV does not natively include congestion-aware routing, but extensions can incorporate queue-length or delay metrics into route selection.
+
+### 4.4 Isolated Nodes
+
+A node becomes isolated when all its neighbours move out of range simultaneously. An isolated node cannot send or receive any data until a new neighbour enters its range. From the network's perspective, isolation appears similar to a node failure. Detecting isolation is straightforward for the node itself (no Hello messages received, all transmissions fail) but difficult to detect remotely. Routing agents can infer isolation when a node's neighbour count drops to zero across multiple consecutive monitoring windows.
+
+### 4.5 Wormhole Attack
+
+In a wormhole attack, two colluding malicious nodes create a private out-of-band tunnel. Node M1 captures RREQ packets at one end of the network and replays them at M2 at the other end. This creates an artificially short route, attracting traffic through the wormhole. The wormhole can then drop, delay, or eavesdrop on all tunnelled traffic. Wormholes are particularly dangerous because they exploit the route discovery mechanism itself. Detection uses geographic leashes (position-based route validation) or temporal leashes (round-trip-time consistency checks).
+
+### 4.6 Sybil Attack
+
+A Sybil attacker creates multiple fake identities, making one physical node appear as many. This distorts distributed algorithms that assume one vote or one route per node, inflating the attacker's influence in routing, trust computation, and cluster formation. Cryptographic identity binding and centralised certificate authorities can prevent Sybil attacks but add key management overhead.
+
+## 5. PERFORMANCE METRICS: PDR, THROUGHPUT, AND DELAY
+
+### 5.1 Packet Delivery Ratio (PDR)
+
+PDR = (packets received by destination) / (packets sent by source). PDR is the primary measure of routing effectiveness in a MANET. A PDR above 0.9 is generally considered good; below 0.6 indicates significant routing problems; below 0.3 indicates severe failure (partition, attack, or extreme congestion). PDR degradation can stem from link breaks, attacks, congestion, or isolation. Monitoring PDR over time reveals the onset and duration of faults.
+
+### 5.2 Throughput
+
+Effective throughput is the volume of application data successfully delivered per unit time (kbps or Mbps). Throughput depends on PDR, channel bandwidth, and MAC efficiency. In a 2.4 GHz 802.11b MANET with 11 Mbps raw capacity, effective application-layer throughput per flow is typically 1–5 Mbps under low load, degrading sharply with node density and mobility. Low throughput alongside low PDR usually indicates routing failure; low throughput with moderate PDR can indicate congestion or hidden terminals.
+
+### 5.3 End-to-End Delay
+
+End-to-end delay includes queuing delay, MAC backoff, propagation delay (negligible at terrestrial scales), and route discovery latency. In a stable MANET with pre-established routes, delay should be below 50 ms for a 5-hop path. During route re-establishment after a link break, delays can spike to several seconds. Average delay above 500 ms is a concern for interactive applications; above 1000 ms indicates serious problems. High delay with normal PDR may indicate congestion rather than route failure.
+
+### 5.4 Metric Trade-offs
+
+There is an inherent trade-off between route stability (fewer breaks) and route optimality (fewest hops). Stable-route algorithms prefer links with high signal strength and stable neighbours, reducing RERR frequency at the cost of longer paths. Longer paths increase per-packet delay and energy consumption. Similarly, aggressive local repair reduces discovery latency but may lock in suboptimal routes. Protocol designers must tune aggressiveness based on application requirements and node mobility levels.
+
+## 6. EPIDEMIC ROUTING VS. AODV
+
+### 6.1 Epidemic Routing
+
+Epidemic Routing is a flooding-based Delay-Tolerant Networking protocol. Each node buffers messages and exchanges summaries with every encountered node, forwarding any messages the contact does not yet have (like biological epidemic spread). Epidemic routing achieves very high delivery probability even in sparse, intermittently connected networks because it exploits mobility as a carrier. However, it consumes enormous buffer space and bandwidth, as every message is potentially replicated across all nodes. It is suitable for DTN scenarios with long tolerances for latency but unsuitable for real-time or high-load traffic.
+
+### 6.2 AODV vs. Epidemic Comparison
+
+AODV assumes continuous connectivity along chosen paths and fails gracefully when connectivity is intermittent. It is efficient under moderate mobility with connected topology. Epidemic routing tolerates disconnection at the cost of resource consumption. Hybrid approaches (Spray-and-Wait, Prophet) limit replication to k copies or use delivery probability estimates to intelligently forward messages, achieving better delivery than AODV in partitioned networks while using less buffer than pure epidemic routing.
+
+## 7. RECOVERY STRATEGIES
+
+### 7.1 Route Re-discovery
+
+The simplest recovery is to discard the broken route and issue a new RREQ. This is reliable but introduces delay equal to the round-trip time for route discovery plus any expanding-ring search phases. Recommended when local repair fails or when the broken link is near the destination.
+
+### 7.2 Local Repair
+
+An intermediate node adjacent to the broken link attempts a local RREQ with limited TTL to find an alternate path around the break. If successful, it unicasts an RREP upstream, allowing data flow to resume without notifying the source. Local repair is faster than full re-discovery but may select suboptimal routes. It is configured via AODV's LOCAL_ADD_TO_EXISTING_ROUTE flag.
+
+### 7.3 Path Redundancy and Multi-path Routing
+
+Multi-path AODV (AOMDV) discovers multiple loop-free paths in a single route discovery. If the primary path fails, an alternate path is immediately available without re-discovery. This greatly reduces recovery latency but increases routing table memory and may increase control overhead.
+
+### 7.4 Proactive Path Maintenance
+
+Nodes monitor link quality continuously (via received signal strength, packet loss rate, or link-layer ACKs) and initiate route repair before a link actually fails. Predictive handoff based on signal-strength trends allows seamless rerouting, significantly reducing packet loss during node movement.
+
+### 7.5 Black Hole Mitigation
+
+After detecting a black hole node (via promiscuous monitoring or route verification), the response is to: (1) invalidate all routes through the suspected node, (2) add the node to a local blacklist, (3) initiate route re-discovery with the blacklisted node excluded from route selection, and (4) propagate a warning to neighbours so they also avoid the node. Coordinated blacklisting prevents the attacker from capturing routes from other nodes.
+
+### 7.6 Network Partition Recovery
+
+When a partition is detected, store-carry-forward mechanisms buffer packets at the partition boundary. Mobile relay nodes (ferries) can be dispatched to physically bridge partitions. Alternatively, increasing transmission power temporarily extends node range to bridge the gap, though this increases interference.
+
+### 7.7 Congestion Relief
+
+Congestion recovery involves: reducing source transmission rate (rate limiting), re-routing traffic around congested nodes using alternate paths, or shedding low-priority flows. Cross-layer feedback from the MAC layer (queue length, collision rate) to the routing layer enables adaptive load balancing. Explicit Congestion Notification (ECN) adaptations for MANETs signal upstream nodes to reduce injection rates before buffers overflow.
+
+## 8. ANOMALY INTERPRETATION GUIDE
+
+A sudden PDR drop below 0.3 combined with multiple simultaneous link breaks strongly suggests a black hole attack or severe network partition. If PDR is low but link breaks are few, congestion or a single high-traffic bottleneck node is more likely. Isolated nodes (neighbour_count=0) appearing suddenly without prior mobility increase suggest possible Sybil or Wormhole attacks creating phantom links and then dropping traffic. High average delay with normal PDR and normal link break rate points to congestion or hidden terminal interference. Gradual throughput reduction over many time windows with stable PDR suggests energy depletion of a key relay node reducing its forwarding capability. Rapid oscillation of PDR between good and bad values is characteristic of a node moving in and out of range (marginal link) or intermittent interference from an adjacent network.
+
+When multiple anomalies co-occur — for instance, low PDR, high delay, many link breaks, and low throughput simultaneously — the most probable cause is either a severe network partition or an active black hole/wormhole attack that is disrupting routing control messages as well as data forwarding. Recovery in this case requires both route re-discovery (to find paths around the affected area) and security countermeasures (blacklisting suspected attackers). Monitoring agents should track the affected_nodes list across consecutive anomaly windows: a consistently affected subset of nodes that shows zero forwarding despite having neighbours is a hallmark of selective forwarding or black hole behaviour.
