@@ -67,19 +67,30 @@ def decide(state: AuraState, cfg: Settings) -> RecoveryAction:
         ))
 
     # 3. reroute the worst connected flow over its best safe path
-    routable = [r for r in routes if r.get("connected") and r.get("best")]
+    def llm_ok(r):
+        lr = r.get("llm_route")
+        return lr is not None and not lr.get("rejected")
+
+    routable = [r for r in routes if r.get("connected") and (r.get("best") or llm_ok(r))]
     if routable:
         r = routable[0]  # routes are ordered worst PDR first
-        best = r["best"]
+        best = r.get("best")
+        if llm_ok(r):
+            chosen_route, origin = r["llm_route"], "LLM-chosen"
+            vs = (f" Computed best was {best['path']} (score {best['score']})." if best else "")
+        else:
+            chosen_route, origin = best, "computed"
+            why = "; ".join(r.get("llm_route_errors") or (r.get("llm_route") or {}).get("rejection_reasons") or [])
+            vs = f" LLM path not used: {why}." if why else ""
         candidates.append(RecoveryAction(
             action_type="reroute_flow",
             flow_id=r["flow_id"],
-            target_nodes=best["path"],
-            parameters={"path": best["path"], "score": best["score"],
-                        "min_link_lifetime_s": best["min_link_lifetime_s"]},
+            target_nodes=chosen_route["path"],
+            parameters={"path": chosen_route["path"], "score": chosen_route["score"],
+                        "min_link_lifetime_s": chosen_route["min_link_lifetime_s"], "route_origin": origin},
             rationale=(f"Flow {r['flow_id']} ({r['source']}->{r['destination']}) has window PDR "
-                       f"{r['window_pdr']} but a path exists; best safe path {best['path']} "
-                       f"(score {best['score']}, {best['hop_count']} hops)."),
+                       f"{r['window_pdr']} but a path exists; {origin} path {chosen_route['path']} "
+                       f"(score {chosen_route['score']}, {chosen_route['hop_count']} hops).{vs}"),
         ))
 
     # 4. protocol switch requested by the diagnosis for route instability

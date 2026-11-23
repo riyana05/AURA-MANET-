@@ -43,6 +43,7 @@ def build_graph(
     retrieve,
     executor: Executor,
     record_case=None,
+    llm_off_reason: str | None = None,
 ):
     """Compile the agent graph with its dependencies injected.
 
@@ -144,7 +145,7 @@ def build_graph(
 
     g = StateGraph(AuraState)
     g.add_node("monitoring", monitoring_agent)
-    g.add_node("diagnosis", make_diagnosis_agent(llm, retrieve, cfg))
+    g.add_node("diagnosis", make_diagnosis_agent(llm, retrieve, cfg, llm_off_reason))
     g.add_node("security", security_agent)
     g.add_node("routing", routing_agent)
     g.add_node("orchestrator", orchestrator_agent)

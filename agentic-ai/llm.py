@@ -9,6 +9,7 @@ rule-based mode) when no API key is configured.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -35,6 +36,7 @@ class GroqStructuredLLM:
         from langchain_groq import ChatGroq
 
         self.name = f"groq:{cfg.LLM_MODEL}"
+        self.last_call: dict = {}
         self._chat = ChatGroq(
             model=cfg.LLM_MODEL,
             api_key=api_key,
@@ -44,8 +46,24 @@ class GroqStructuredLLM:
         )
 
     def generate(self, system: str, user: str, schema: type[T]) -> T:
-        runnable = self._chat.with_structured_output(schema)
-        result = runnable.invoke([("system", system), ("human", user)])
+        """Call Groq; ``self.last_call`` records proof of the call (model, tokens, time)."""
+        runnable = self._chat.with_structured_output(schema, include_raw=True)
+        start = time.perf_counter()
+        out = runnable.invoke([("system", system), ("human", user)])
+        raw = out.get("raw")
+        meta = getattr(raw, "response_metadata", {}) or {}
+        usage = meta.get("token_usage") or {}
+        self.last_call = {
+            "provider": "groq",
+            "model": meta.get("model_name"),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "latency_s": round(time.perf_counter() - start, 2),
+        }
+        logger.info("LLM call: %s", self.last_call)
+        if out.get("parsing_error") is not None:
+            raise ValueError(f"LLM output did not match the schema: {out['parsing_error']}")
+        result = out.get("parsed")
         if isinstance(result, schema):
             return result
         return schema.model_validate(result)  # dict output -> validate

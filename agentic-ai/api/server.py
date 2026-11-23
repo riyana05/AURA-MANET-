@@ -6,6 +6,7 @@ Run:  python aura.py serve            (http://127.0.0.1:8000/docs for Swagger)
 Endpoints
 ---------
 GET  /ui?time=T&backend=B        HTML page: the moment analysed with vs without the LLM
+GET  /dashboard?step=S           HTML page: how the AI helps over the whole run
 GET  /health                     status, LLM / RAG / ns-3 availability
 GET  /run                        run info: times, nodes, protocol, data availability
 GET  /metrics?time=T             network_metrics row + windowed metrics at T
@@ -23,6 +24,7 @@ folder; the default is ``NS3_METRICS_DIR``.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -106,6 +108,20 @@ def create_app(pipeline: AuraPipeline | None = None) -> FastAPI:
         with_llm, without_llm = p.analyze_both(time, data_dir, backend)
         form = ui_form(time, backend, ds.start_time, ds.end_time)
         return render_comparison(with_llm, without_llm, getattr(p.llm, "name", None), form)
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard_page(step: float = 10.0, backend: Backend = "ns3_rerun", llm: bool = False,
+                       focus: float | None = None, data_dir: str | None = None):
+        from dashboard import TEMPLATE, collect
+
+        if step <= 0:
+            raise HTTPException(422, "step must be > 0")
+        try:
+            data = collect(pipe(), data_dir, step, backend, llm, focus)
+        except DataLoadError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        payload = json.dumps(data, default=str).replace("</", "<\\/")
+        return TEMPLATE.replace("__DATA__", payload)
 
     @app.get("/health")
     def health():

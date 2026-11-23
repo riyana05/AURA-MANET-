@@ -160,3 +160,36 @@ def test_what_if_tests_overridden_recommendation(partition_run, kb, tmp_path, te
     assert chk["execution"]["status"] == "dry_run"           # dry_run backend: not executed
     # t=8 is the last second of the test run, so nothing is left to measure
     assert chk["verification"]["status"] == "insufficient_data"
+
+
+def test_dashboard_collects_and_renders(partition_run, kb, tmp_path, test_settings):
+    from dashboard import collect, write_dashboard
+
+    p = _pipeline(kb, tmp_path, test_settings)
+    data = collect(p, partition_run, step=2, backend="dry_run")
+    assert len(data["timeline"]) == 9 and data["focus"] >= 5
+    assert any(d["time"] == data["focus"] for d in data["decisions"])
+    worst = next(d for d in data["decisions"] if d["time"] == 8.0)
+    assert worst["action"]["action_type"] == "increase_tx_range"
+    assert worst["extra_links"] == []  # node 3 is 220 m from node 2: a 125 m radio adds nothing here
+    html_text = write_dashboard(data, tmp_path / "d.html").read_text()
+    assert "How the AI is helping this network" in html_text and "__DATA__" not in html_text
+    from api.server import create_app
+
+    page = TestClient(create_app(p)).get("/dashboard", params={"step": 4, "backend": "dry_run",
+                                                               "data_dir": str(partition_run)})
+    assert page.status_code == 200 and "application/json" in page.text
+
+
+def test_llm_off_reason_is_honest(partition_run, kb, tmp_path, test_settings, fake_llm_cls):
+    llm = fake_llm_cls({"root_cause": "x", "findings": [], "recommended_action": "no_action",
+                        "reasoning": "", "cited_chunk_ids": []})
+    llm.last_call = {"model": "fake-model", "prompt_tokens": 10, "completion_tokens": 5, "latency_s": 0.1}
+    p = _pipeline(kb, tmp_path, test_settings, llm=llm)
+    with_llm, without_llm = p.analyze_both(8.0, partition_run)
+    assert with_llm["diagnosis"]["llm_call"]["model"] == "fake-model"
+    notes = " ".join(without_llm["diagnosis"]["notes"])
+    assert "switched off" in notes and "not set" not in notes
+    # No LLM object at all -> the missing-key explanation
+    r = _pipeline(kb, tmp_path, test_settings, llm=None).analyze(8.0, partition_run, save=False)
+    assert "GROQ_API_KEY not set" in " ".join(r["diagnosis"]["notes"])

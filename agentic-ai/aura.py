@@ -5,6 +5,7 @@ aura.py — Command-line entry point for the AURA-MANET agentic AI backend.
     python aura.py analyze --time 80 --backend ns3_rerun   # execute + verify in ns-3
     python aura.py monitor --step 1                   # anomaly timeline (fast)
     python aura.py compare --step 10 --backend ns3_rerun   # agentic vs baseline
+    python aura.py dashboard                          # "how the AI helps" page (opens in browser)
     python aura.py rag-ingest                         # (re)build the FAISS index
     python aura.py rag-query "black hole attack"
     python aura.py serve --port 8000                  # FastAPI server
@@ -43,6 +44,10 @@ def _print_analysis(r: dict) -> None:
             print(textwrap.fill(d["reasoning"], 100, initial_indent="    ", subsequent_indent="    "))
         if d.get("sources"):
             print("  Knowledge cited: " + ", ".join(s["chunk_id"] for s in d["sources"]))
+        if d.get("llm_call"):
+            c = d["llm_call"]
+            print(f"  LLM call: {c.get('model')} answered in {c.get('latency_s')} s "
+                  f"({c.get('prompt_tokens')} tokens in, {c.get('completion_tokens')} out)")
         for n in d.get("notes", []):
             print(f"  note: {n}")
     a = r.get("recovery_action") or {}
@@ -91,6 +96,13 @@ def main() -> None:
     c.add_argument("--backend", choices=["dry_run", "ns3_rerun"])
     c.add_argument("--llm", action="store_true", help="use the LLM (one call per time step)")
     c.add_argument("--out", help="write the full comparison JSON here")
+
+    db = sub.add_parser("dashboard", help="interactive page: how the AI helps over the whole run")
+    db.add_argument("--step", type=float, default=10.0, help="seconds between AI decisions")
+    db.add_argument("--backend", choices=["dry_run", "ns3_rerun"], default="ns3_rerun")
+    db.add_argument("--llm", action="store_true", help="use the LLM at every decision (one call each)")
+    db.add_argument("--focus", type=float, help="moment to open in detail (default: worst moment)")
+    db.add_argument("--no-popup", action="store_true")
 
     sub.add_parser("rag-ingest", help="(re)build the FAISS index")
     q = sub.add_parser("rag-query", help="search the knowledge base")
@@ -155,6 +167,17 @@ def main() -> None:
                 import webbrowser
 
                 webbrowser.open(report.resolve().as_uri())
+    elif args.cmd == "dashboard":
+        from dashboard import collect, write_dashboard
+
+        print("Analysing the whole run (this takes a little while)...")
+        data = collect(pipe, args.data_dir, args.step, args.backend, args.llm, args.focus)
+        path = write_dashboard(data, cfg.RESULTS_DIR / "dashboard.html")
+        print(f"Dashboard: {path}")
+        if not args.no_popup:
+            import webbrowser
+
+            webbrowser.open(path.resolve().as_uri())
     elif args.cmd == "monitor":
         for row in pipe.monitor_sweep(args.data_dir, args.start, args.end, args.step):
             print(f"t={row['time']:6g}  {row['max_severity'] or '-':8s}  {', '.join(row['types']) or '-'}")

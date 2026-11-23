@@ -206,3 +206,40 @@ def test_llm_fact_check_catches_wrong_connectivity_claims(tmp_path, test_setting
     assert d["confidence"] == 0.6  # 0.9 - 2 x 0.15
     assert any("Fact-check" in n for n in d["notes"])
     assert '"flow_connectivity"' in llm.calls[0][1]
+
+
+def _llm_route_state(tmp_path, cfg, fake_llm_cls, path):
+    st = _square_state(tmp_path, cfg)  # diamond 0-1-3 / 0-2-3, flow 0 (0->3) failing but connected
+    llm = fake_llm_cls({
+        "root_cause": "route instability", "recommended_action": "reroute_flow", "reasoning": "",
+        "findings": [{"fault": "route_instability", "confidence": 0.8, "affected_nodes": [0, 3]}],
+        "route_choices": [{"flow_id": 0, "path": path, "reason": "test"}],
+    })
+    from agents.routing_agent import routing_agent
+    from agents.security_agent import security_agent
+
+    st.update(make_diagnosis_agent(llm, None, cfg)(st))
+    st.update(security_agent(st))
+    st.update(routing_agent(st))
+    return st, llm
+
+
+def test_llm_gets_link_list_and_its_valid_route_is_used(tmp_path, test_settings, fake_llm_cls):
+    st, llm = _llm_route_state(tmp_path, test_settings, fake_llm_cls, [0, 2, 3])
+    prompt = llm.calls[0][1]
+    assert '"flows_needing_routes"' in prompt and '"links"' in prompt
+    r = st["candidate_routes"][0]
+    assert r["llm_route"]["path"] == [0, 2, 3] and r["llm_route"]["origin"] == "llm"
+    act = decide(st, test_settings)
+    assert act.action_type == "reroute_flow" and act.parameters["path"] == [0, 2, 3]
+    assert act.parameters["route_origin"] == "LLM-chosen"
+    assert validate_action(act.model_dump(), st, test_settings, "dry_run").valid
+
+
+def test_llm_route_with_invented_link_is_rejected(tmp_path, test_settings, fake_llm_cls):
+    st, _ = _llm_route_state(tmp_path, test_settings, fake_llm_cls, [0, 3])  # 0-3 are not neighbours
+    r = st["candidate_routes"][0]
+    assert r["llm_route"] is None and "do not exist" in r["llm_route_errors"][0]
+    act = decide(st, test_settings)
+    assert act.parameters["route_origin"] == "computed"
+    assert "LLM path not used" in act.rationale

@@ -60,6 +60,13 @@ Rules:
   `flow_connectivity` and `topology.isolated_nodes`; these claims are checked.
 - Pick `recommended_action` from the allowed actions, preferring the least
   disruptive action that addresses the root cause.
+- ROUTES: for every flow in `flows_needing_routes`, choose ONE path in
+  `route_choices` (flow_id, path from source to destination, short reason).
+  Use ONLY links listed in `links` (each is [node_a, node_b, predicted
+  lifetime in s, range margin 0..1]); every consecutive pair in the path must
+  be a listed link. Prefer relays whose links have long predicted lifetime and
+  high margin, with few hops. Your paths are checked by code; invalid paths are
+  rejected.
 Return the structured result only."""
 
 
@@ -109,7 +116,27 @@ def summarise_facts(state: AuraState) -> dict:
         ],
         "flows_in_outage": sorted(f for f in outage_flows if f is not None),
         "flow_connectivity": measured_flow_connectivity(state),
+        **route_facts(state),
     }
+
+
+def route_facts(state: AuraState) -> dict:
+    """Flows the LLM should route, plus the links it may use (with lifetimes)."""
+    from agents.routing_agent import affected_flows
+
+    conn = measured_flow_connectivity(state)
+    flows = [
+        {"flow_id": f["flow_id"], "source": f["source"], "destination": f["destination"]}
+        for f in affected_flows(state, get_settings())
+        if conn.get(int(f["flow_id"]))
+    ]
+    if not flows:
+        return {"flows_needing_routes": []}
+    links = [
+        [link["a"], link["b"], link.get("lifetime_s"), link.get("margin")]
+        for link in (state.get("topology") or {}).get("links", [])
+    ]
+    return {"flows_needing_routes": flows, "links": links}
 
 
 def measured_flow_connectivity(state: AuraState) -> dict[int, bool]:
@@ -230,6 +257,7 @@ def validate_llm_output(
         sources=cited,
         notes=notes,
         fact_check=check,
+        route_choices=out.route_choices,
     )
 
 
@@ -363,8 +391,13 @@ def make_diagnosis_agent(
     llm: StructuredLLM | None,
     retrieve: Callable[[str, int], list[RetrievedChunk]] | None,
     cfg: Settings | None = None,
+    llm_off_reason: str | None = None,
 ):
-    """Create the LangGraph node with its dependencies injected."""
+    """Create the LangGraph node with its dependencies injected.
+
+    ``llm_off_reason`` explains why ``llm`` is None (e.g. switched off on
+    purpose); when omitted, a missing/unusable API key is assumed.
+    """
 
     def diagnosis_agent(state: AuraState) -> dict:
         if state.get("error"):
@@ -390,13 +423,16 @@ def make_diagnosis_agent(
             try:
                 out = llm.generate(SYSTEM_PROMPT, build_user_prompt(state, chunks), LLMDiagnosisOutput)
                 diagnosis = validate_llm_output(out, state, chunks)
+                diagnosis.llm_call = dict(getattr(llm, "last_call", {}) or {"model": getattr(llm, "name", "?")})
             except Exception as exc:  # noqa: BLE001 - network / validation errors
                 notes.append(f"LLM diagnosis failed ({type(exc).__name__}: {exc}); used rule-based fallback.")
                 logger.warning("LLM diagnosis failed: %s", exc)
         if diagnosis is None:
             diagnosis = rule_based_diagnosis(state, chunks)
             if llm is None:
-                notes.append("No LLM configured (GROQ_API_KEY unset): rule-based diagnosis.")
+                notes.append(llm_off_reason or
+                             "No LLM available (GROQ_API_KEY not set, or the Groq client could not "
+                             "start): rule-based diagnosis.")
         diagnosis.notes = notes + diagnosis.notes
 
         summary = (f"[{diagnosis.method}] {diagnosis.root_cause} "

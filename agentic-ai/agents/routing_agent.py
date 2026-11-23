@@ -116,8 +116,49 @@ def score_path(
     return round(score, 4), {k: round(v, 4) for k, v in components.items()}, extra
 
 
+def _candidate(g, path, flow_id, security, nodes_info, max_energy, cfg, origin="computed", reason=""):
+    score, comps, extra = score_path(g, path, nodes_info, max_energy, cfg)
+    reasons = assess_route(path, security, extra["lifetimes"], cfg)
+    return RouteCandidate(
+        flow_id=flow_id,
+        source=path[0],
+        destination=path[-1],
+        path=list(path),
+        hop_count=len(path) - 1,
+        total_distance_m=round(extra["distance"], 2),
+        min_link_margin=round(extra["min_margin"], 4),
+        min_link_lifetime_s=None if extra["min_life"] is None else round(extra["min_life"], 3),
+        min_trust=extra["min_trust"],
+        min_energy_j=extra["min_energy"],
+        score=score,
+        score_components=comps,
+        rejected=bool(reasons),
+        rejection_reasons=reasons,
+        origin=origin,
+        reason=reason,
+    )
+
+
+def check_llm_path(g: nx.Graph, path: list[int], src: int, dst: int) -> list[str]:
+    """Structural errors in an LLM-chosen path (empty list = structurally valid)."""
+    errors: list[str] = []
+    if len(path) < 2:
+        return ["path has fewer than two nodes"]
+    if path[0] != src or path[-1] != dst:
+        errors.append(f"path must go from {src} to {dst}, got {path[0]} to {path[-1]}")
+    unknown = [n for n in path if n not in g]
+    if unknown:
+        errors.append(f"unknown nodes {unknown}")
+    if len(set(path)) != len(path):
+        errors.append("path visits a node twice")
+    missing = [(a, b) for a, b in zip(path, path[1:]) if a in g and b in g and not g.has_edge(a, b)]
+    if missing:
+        errors.append(f"uses links that do not exist: {missing}")
+    return errors
+
+
 def route_flow(
-    g: nx.Graph, flow: dict, security: dict, cfg: Settings
+    g: nx.Graph, flow: dict, security: dict, cfg: Settings, llm_choice: dict | None = None
 ) -> FlowRouting:
     src, dst = int(flow["source"]), int(flow["destination"])
     result = FlowRouting(
@@ -129,6 +170,8 @@ def route_flow(
     )
     if not result.connected:
         result.notes.append("No path exists in the current topology (partition).")
+        if llm_choice:
+            result.llm_route_errors.append("LLM chose a path, but this flow has no path at all (partition).")
         return result
 
     excluded = (set(security.get("suspicious_nodes", [])) | set(security.get("low_energy_nodes", []))) - {src, dst}
@@ -143,28 +186,19 @@ def route_flow(
     energies = [n["energy_j"] for n in nodes_info.values() if n.get("energy_j") is not None]
     max_energy = max(energies) if energies else None
 
+    # LLM-chosen path: checked against the real topology, then scored like the others
+    if llm_choice:
+        path = [int(n) for n in llm_choice.get("path", [])]
+        errors = check_llm_path(g, path, src, dst)
+        if errors:
+            result.llm_route_errors = errors
+        else:
+            result.llm_route = _candidate(g, path, result.flow_id, security, nodes_info, max_energy,
+                                          cfg, origin="llm", reason=llm_choice.get("reason", ""))
+
     paths = itertools.islice(nx.shortest_simple_paths(usable, src, dst), cfg.ROUTE_K_PATHS)
     for path in paths:
-        score, comps, extra = score_path(usable, path, nodes_info, max_energy, cfg)
-        reasons = assess_route(path, security, extra["lifetimes"], cfg)
-        result.candidates.append(
-            RouteCandidate(
-                flow_id=result.flow_id,
-                source=src,
-                destination=dst,
-                path=list(path),
-                hop_count=len(path) - 1,
-                total_distance_m=round(extra["distance"], 2),
-                min_link_margin=round(extra["min_margin"], 4),
-                min_link_lifetime_s=None if extra["min_life"] is None else round(extra["min_life"], 3),
-                min_trust=extra["min_trust"],
-                min_energy_j=extra["min_energy"],
-                score=score,
-                score_components=comps,
-                rejected=bool(reasons),
-                rejection_reasons=reasons,
-            )
-        )
+        result.candidates.append(_candidate(usable, path, result.flow_id, security, nodes_info, max_energy, cfg))
     result.candidates.sort(key=lambda c: (c.rejected, -c.score, c.hop_count))
     accepted = [c for c in result.candidates if not c.rejected]
     result.best = accepted[0] if accepted else None
@@ -180,9 +214,13 @@ def routing_agent(state: AuraState) -> dict:
     cfg = get_settings()
     g = graph_from_topology(state.get("topology") or {})
     security = state.get("security_report") or {}
-    routes = [route_flow(g, f, security, cfg) for f in affected_flows(state, cfg)]
+    choices = {int(c["flow_id"]): c for c in (state.get("diagnosis") or {}).get("route_choices", [])}
+    routes = [route_flow(g, f, security, cfg, choices.get(int(f["flow_id"]))) for f in affected_flows(state, cfg)]
     with_route = sum(1 for r in routes if r.best is not None)
     summary = f"{len(routes)} affected flows, {with_route} with a safe alternative route"
+    if choices:
+        ok = sum(1 for r in routes if r.llm_route is not None and not r.llm_route.rejected)
+        summary += f"; LLM chose {len(choices)} route(s), {ok} valid and safe"
     return {
         "candidate_routes": [r.model_dump() for r in routes],
         "trace": [{"agent": "routing", "summary": summary}],

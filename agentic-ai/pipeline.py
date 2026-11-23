@@ -54,9 +54,10 @@ class AuraPipeline:
             record = None
             if self.record_cases:
                 record = lambda st: append_fault_case(self.cfg.RAG_KB_DIR, st)  # noqa: E731
+            reason = None if use_llm else "LLM switched off for this run on purpose (rule-based mode)."
             self._graphs[key] = build_graph(
                 self.cfg, self.llm if use_llm else None, retrieve,
-                make_executor(backend, self.cfg), record,
+                make_executor(backend, self.cfg), record, llm_off_reason=reason,
             )
         return self._graphs[key]
 

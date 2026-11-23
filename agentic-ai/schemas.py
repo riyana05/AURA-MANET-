@@ -89,6 +89,14 @@ class DiagnosisFinding(BaseModel):
     )
 
 
+class LLMRouteChoice(BaseModel):
+    """A path the LLM chooses for one flow (validated by code before use)."""
+
+    flow_id: int
+    path: list[int] = Field(description="Node ids from the flow's source to its destination.")
+    reason: str = Field(default="", description="Why these relay nodes were chosen.")
+
+
 class LLMDiagnosisOutput(BaseModel):
     """Schema the LLM must fill (validated before it enters the state)."""
 
@@ -110,6 +118,10 @@ class LLMDiagnosisOutput(BaseModel):
         default_factory=list,
         description="node ids you believe currently have no neighbours.",
     )
+    route_choices: list[LLMRouteChoice] = Field(
+        default_factory=list,
+        description="One chosen path per flow listed in flows_needing_routes.",
+    )
 
 
 class Diagnosis(BaseModel):
@@ -126,6 +138,14 @@ class Diagnosis(BaseModel):
     fact_check: dict[str, Any] = Field(
         default_factory=dict,
         description="LLM claims compared with measured connectivity (LLM mode only).",
+    )
+    llm_call: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Proof of the LLM call: model, token counts, latency (LLM mode only).",
+    )
+    route_choices: list[LLMRouteChoice] = Field(
+        default_factory=list,
+        description="Paths the LLM chose (validated later by the Routing agent).",
     )
 
 
@@ -185,6 +205,8 @@ class RouteCandidate(BaseModel):
     score_components: dict[str, float] = Field(default_factory=dict)
     rejected: bool = False
     rejection_reasons: list[str] = Field(default_factory=list)
+    origin: Literal["computed", "llm"] = "computed"
+    reason: str = ""
 
 
 class FlowRouting(BaseModel):
@@ -197,6 +219,12 @@ class FlowRouting(BaseModel):
     window_pdr: float | None = None
     candidates: list[RouteCandidate] = Field(default_factory=list)
     best: RouteCandidate | None = None
+    llm_route: RouteCandidate | None = Field(
+        default=None, description="Path chosen by the LLM, scored and safety-checked like the others."
+    )
+    llm_route_errors: list[str] = Field(
+        default_factory=list, description="Why the LLM's path is unusable (e.g. a link that does not exist)."
+    )
     notes: list[str] = Field(default_factory=list)
 
 
