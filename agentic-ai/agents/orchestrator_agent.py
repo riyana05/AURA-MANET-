@@ -10,9 +10,11 @@ Policy (first match wins; least disruptive action that addresses the cause):
 
 1. Highest anomaly severity below ``ACTION_MIN_SEVERITY``  -> no_action
 2. Suspicious relays with forwarding evidence               -> isolate_node
-3. Affected flow is connected and has a safe route          -> reroute_flow
-4. Diagnosis asks for switch_protocol on route instability  -> switch_protocol
-5. Most affected flows are partitioned                      -> increase_tx_range
+3. Most failing flows have no path at all (partition)       -> increase_tx_range
+   (ranked above reroute / protocol switch; the LLM may not downgrade it to waiting)
+4. Affected flow is connected and has a safe route          -> reroute_flow
+5. Diagnosis asks for switch_protocol on route instability  -> switch_protocol
+   Partitioned flows are a minority but > half of all flows -> increase_tx_range
 6. Some flows partitioned / node isolated / new partition   -> wait_for_reconnection
 7. Otherwise                                                -> no_action
 """
@@ -93,17 +95,32 @@ def decide(state: AuraState, cfg: Settings) -> RecoveryAction:
     # 5./6. partitions
     disconnected = [r for r in routes if not r.get("connected")]
     total_flows = len(state.get("flow_stats") or []) or 1
+    affected = len(routes) or 1
+    # Most of the failing flows have no path at all: rerouting one flow cannot fix that
+    mostly_partitioned = len(disconnected) > affected / 2
     partition_signals = {"network_partition", "isolated_node"} & {a["type"] for a in anomalies}
-    if disconnected and (len(disconnected) > total_flows / 2
+    range_action = None
+    if disconnected and (mostly_partitioned or len(disconnected) > total_flows / 2
                          or diagnosis.get("recommended_action") == "increase_tx_range"):
         new_range = round(min(comm_range * cfg.TX_RANGE_STEP, cfg.MAX_TX_RANGE_M), 1)
         if new_range > comm_range:
-            candidates.append(RecoveryAction(
+            range_action = RecoveryAction(
                 action_type="increase_tx_range",
                 parameters={"range_m": new_range, "from_m": comm_range},
-                rationale=(f"{len(disconnected)} of {total_flows} flows have no path at all; "
+                rationale=(f"{len(disconnected)} of {affected} failing flows have no path at all; "
                            f"raising range {comm_range:g} m -> {new_range:g} m to heal partitions."),
-            ))
+            )
+            if mostly_partitioned:
+                # Partition is the dominant problem: neither rerouting one flow nor a
+                # protocol switch can deliver across it, so heal it first
+                first = next(
+                    (i for i, c in enumerate(candidates)
+                     if c.action_type in {"reroute_flow", "switch_protocol"}),
+                    len(candidates),
+                )
+                candidates.insert(first, range_action)
+            else:
+                candidates.append(range_action)
     if disconnected or partition_signals:
         candidates.append(RecoveryAction(
             action_type="wait_for_reconnection",
@@ -126,7 +143,10 @@ def decide(state: AuraState, cfg: Settings) -> RecoveryAction:
     note = ""
     if rec and rec != chosen.action_type:
         rec_candidate = next((c for c in candidates if c.action_type == rec), None)
-        if (diagnosis.get("method") == "llm_rag"
+        if chosen is range_action and mostly_partitioned:
+            note = (f" Diagnosis recommended '{rec}', but {len(disconnected)} of {affected} failing "
+                    "flows have no path, so the partition is healed first.")
+        elif (diagnosis.get("method") == "llm_rag"
                 and rec_candidate is not None
                 and ACTION_DISRUPTION[rec] < ACTION_DISRUPTION[chosen.action_type]
                 and float(diagnosis.get("confidence", 0)) >= 0.7):
@@ -138,6 +158,33 @@ def decide(state: AuraState, cfg: Settings) -> RecoveryAction:
     chosen.rationale += note
     chosen.alternatives = others
     return chosen
+
+
+def build_action(action_type: str, state: AuraState, cfg: Settings) -> RecoveryAction | None:
+    """Concrete action for a recommended *action_type* (used for what-if checks)."""
+    comm_range = float(state.get("comm_range_m") or 100.0)
+    protocol = state.get("protocol") or "AODV"
+    if action_type == "increase_tx_range":
+        new_range = round(min(comm_range * cfg.TX_RANGE_STEP, cfg.MAX_TX_RANGE_M), 1)
+        return RecoveryAction(action_type=action_type,
+                              parameters={"range_m": new_range, "from_m": comm_range},
+                              rationale="Diagnosis recommendation (what-if).")
+    if action_type == "switch_protocol":
+        return RecoveryAction(action_type=action_type,
+                              parameters={"protocol": PROTOCOL_ALTERNATIVE.get(protocol, "OLSR"), "from": protocol},
+                              rationale="Diagnosis recommendation (what-if).")
+    if action_type == "reroute_flow":
+        r = next((r for r in state.get("candidate_routes") or [] if r.get("best")), None)
+        if r:
+            return RecoveryAction(action_type=action_type, flow_id=r["flow_id"],
+                                  target_nodes=r["best"]["path"], parameters={"path": r["best"]["path"]},
+                                  rationale="Diagnosis recommendation (what-if).")
+    if action_type == "isolate_node":
+        nodes = (state.get("security_report") or {}).get("suspicious_nodes") or []
+        if nodes:
+            return RecoveryAction(action_type=action_type, target_nodes=nodes, parameters={"nodes": nodes},
+                                  rationale="Diagnosis recommendation (what-if).")
+    return None
 
 
 def orchestrator_agent(state: AuraState) -> dict:

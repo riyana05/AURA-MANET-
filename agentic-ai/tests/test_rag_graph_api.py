@@ -73,7 +73,7 @@ def test_full_graph_dry_run(partition_run, kb, tmp_path, test_settings):
     r = p.analyze(2.0, partition_run)
     agents = [e["agent"] for e in r["trace"]]
     for name in ["monitoring", "diagnosis", "security", "routing", "orchestrator",
-                 "validation", "execution", "verification", "baseline"]:
+                 "validation", "execution", "verification", "what_if", "baseline"]:
         assert name in agents
     assert r["execution_result"]["executed"] is False
     assert r["verification_result"]["mode"] == "observation_only"
@@ -118,5 +118,45 @@ def test_api_endpoints(partition_run, kb, tmp_path, test_settings):
     assert client.post("/rag/query", json={"query": "partition", "k": 1}).json()["results"]
     assert client.get("/metrics", params={"time": 999, "data_dir": d}).status_code == 422
     assert client.get("/run", params={"data_dir": str(tmp_path / "nope")}).status_code == 404
+    page = client.get("/ui", params={"time": 8, "data_dir": d})
+    assert page.status_code == 200 and "Without LLM (rule-based)" in page.text
+    assert "<form" in client.get("/ui", params={"data_dir": d}).text
     cmp = client.post("/compare", json={"step": 1, "data_dir": d}).json()
     assert cmp["summary"]["samples"] == 9
+
+
+def test_report_shows_both_modes(partition_run, kb, tmp_path, test_settings, fake_llm_cls):
+    llm = fake_llm_cls({
+        "root_cause": "partition <script>",
+        "findings": [{"fault": "topology_partition", "confidence": 0.9, "affected_nodes": [3]}],
+        "recommended_action": "wait_for_reconnection",
+        "reasoning": "node 3 moved out of range",
+        "cited_chunk_ids": [],
+    })
+    p = _pipeline(kb, tmp_path, test_settings, llm=llm)
+    with_llm, without_llm = p.analyze_both(8.0, partition_run)
+    assert with_llm["diagnosis"]["method"] == "llm_rag"
+    assert without_llm["diagnosis"]["method"] == "rule_based"
+    page = p.write_report(with_llm, without_llm).read_text()
+    assert "With LLM (fake)" in page and "Without LLM (rule-based)" in page
+    assert "node 3 moved out of range" in page
+    assert "<script>" not in page  # LLM text is HTML-escaped
+
+
+def test_what_if_tests_overridden_recommendation(partition_run, kb, tmp_path, test_settings, fake_llm_cls):
+    # LLM recommends switching protocol; the policy decides otherwise -> what-if checks it
+    llm = fake_llm_cls({
+        "root_cause": "routing protocol too slow",
+        "findings": [{"fault": "route_instability", "confidence": 0.5}],
+        "recommended_action": "switch_protocol",
+        "reasoning": "...",
+        "claimed_disconnected_flows": [0],
+        "claimed_isolated_nodes": [3],
+    })
+    r = _pipeline(kb, tmp_path, test_settings, llm=llm).analyze(8.0, partition_run, save=False)
+    assert r["recovery_action"]["action_type"] == "increase_tx_range"
+    chk = r["recommendation_check"]
+    assert chk["status"] == "tested" and chk["action"]["parameters"]["protocol"] == "OLSR"
+    assert chk["execution"]["status"] == "dry_run"           # dry_run backend: not executed
+    # t=8 is the last second of the test run, so nothing is left to measure
+    assert chk["verification"]["status"] == "insufficient_data"

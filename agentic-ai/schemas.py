@@ -102,6 +102,14 @@ class LLMDiagnosisOutput(BaseModel):
         default_factory=list,
         description="chunk_id values of the knowledge passages that were used.",
     )
+    claimed_disconnected_flows: list[int] = Field(
+        default_factory=list,
+        description="flow_id values you believe have NO path between source and destination.",
+    )
+    claimed_isolated_nodes: list[int] = Field(
+        default_factory=list,
+        description="node ids you believe currently have no neighbours.",
+    )
 
 
 class Diagnosis(BaseModel):
@@ -115,6 +123,10 @@ class Diagnosis(BaseModel):
     method: Literal["llm_rag", "rule_based", "none"]
     sources: list[RetrievedChunk] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    fact_check: dict[str, Any] = Field(
+        default_factory=dict,
+        description="LLM claims compared with measured connectivity (LLM mode only).",
+    )
 
 
 # --------------------------------------------------------------------------- #

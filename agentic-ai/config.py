@@ -43,7 +43,7 @@ class Settings(BaseSettings):
             "rule-based mode; everything else works unchanged."
         ),
     )
-    LLM_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    LLM_MODEL: str = Field(default="openai/gpt-oss-120b")
     LLM_TEMPERATURE: float = Field(default=0.0, ge=0.0, le=2.0)
     LLM_TIMEOUT_S: float = Field(default=60.0, gt=0.0)
 

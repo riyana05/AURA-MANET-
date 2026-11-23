@@ -56,6 +56,8 @@ Rules:
   mention it only as unverifiable with low confidence.
 - `affected_nodes` must be node IDs from the input.
 - `cited_chunk_ids` must be chunk ids from the reference passages you used.
+- Fill `claimed_disconnected_flows` and `claimed_isolated_nodes` exactly from
+  `flow_connectivity` and `topology.isolated_nodes`; these claims are checked.
 - Pick `recommended_action` from the allowed actions, preferring the least
   disruptive action that addresses the root cause.
 Return the structured result only."""
@@ -106,6 +108,43 @@ def summarise_facts(state: AuraState) -> dict:
             for a in anomalies
         ],
         "flows_in_outage": sorted(f for f in outage_flows if f is not None),
+        "flow_connectivity": measured_flow_connectivity(state),
+    }
+
+
+def measured_flow_connectivity(state: AuraState) -> dict[int, bool]:
+    """flow_id -> whether source and destination are connected right now (measured)."""
+    import networkx as nx
+
+    topo = state.get("topology") or {}
+    g = nx.Graph()
+    g.add_nodes_from(n["id"] for n in topo.get("nodes", []))
+    g.add_edges_from((link["a"], link["b"]) for link in topo.get("links", []))
+    out: dict[int, bool] = {}
+    for f in state.get("flow_stats") or []:
+        s, d = int(f["source"]), int(f["destination"])
+        out[int(f["flow_id"])] = s in g and d in g and nx.has_path(g, s, d)
+    return out
+
+
+def fact_check(out: LLMDiagnosisOutput, state: AuraState) -> dict:
+    """Compare the LLM's connectivity claims with the measured topology."""
+    conn = measured_flow_connectivity(state)
+    measured_disc = sorted(f for f, ok in conn.items() if not ok)
+    measured_iso = sorted((state.get("topology") or {}).get("isolated_nodes", []))
+    claimed_disc = sorted(set(out.claimed_disconnected_flows))
+    claimed_iso = sorted(set(out.claimed_isolated_nodes))
+    wrong_disc = sorted(f for f in claimed_disc if conn.get(f, True))
+    wrong_iso = sorted(set(claimed_iso) - set(measured_iso))
+    errors = len(wrong_disc) + len(wrong_iso)
+    return {
+        "claimed_disconnected_flows": claimed_disc,
+        "measured_disconnected_flows": measured_disc,
+        "wrongly_claimed_disconnected": wrong_disc,
+        "claimed_isolated_nodes": claimed_iso,
+        "measured_isolated_nodes": measured_iso,
+        "wrongly_claimed_isolated": wrong_iso,
+        "passed": errors == 0,
     }
 
 
@@ -163,6 +202,23 @@ def validate_llm_output(
         notes.append("LLM recommended isolate_node without forwarding evidence; downgraded to no_action.")
         action = "no_action"
 
+    check = fact_check(out, state)
+    if not check["passed"]:
+        penalty = 0.15 * (bool(check["wrongly_claimed_disconnected"]) + bool(check["wrongly_claimed_isolated"]))
+        for f in findings:
+            f.confidence = round(max(0.1, f.confidence - penalty), 2)
+        if check["wrongly_claimed_disconnected"]:
+            notes.append(
+                f"Fact-check: LLM claimed flows {check['wrongly_claimed_disconnected']} are disconnected, "
+                f"but measured topology shows they have a path (disconnected: "
+                f"{check['measured_disconnected_flows']}). Confidence lowered."
+            )
+        if check["wrongly_claimed_isolated"]:
+            notes.append(
+                f"Fact-check: LLM claimed nodes {check['wrongly_claimed_isolated']} are isolated; "
+                f"measured isolated nodes: {check['measured_isolated_nodes']}. Confidence lowered."
+            )
+
     findings.sort(key=lambda f: -f.confidence)
     return Diagnosis(
         root_cause=out.root_cause,
@@ -173,6 +229,7 @@ def validate_llm_output(
         method="llm_rag",
         sources=cited,
         notes=notes,
+        fact_check=check,
     )
 
 

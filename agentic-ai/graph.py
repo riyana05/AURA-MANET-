@@ -8,7 +8,7 @@ graph.py — LangGraph orchestration of the AURA-MANET agents.
                          |                                                  v
                          +-(no anomalies)-> orchestrator          execution
                                                                             |
-                                         END <- baseline <- verification <--+
+                           END <- baseline <- what_if <- verification <--+
 
 * Diagnosis (LLM + RAG) and Security run in parallel; Routing waits for both.
 * With no anomalies the expensive branch is skipped.
@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from agents.action_validator import validate_action
 from agents.diagnosis_agent import make_diagnosis_agent
 from agents.monitoring_agent import monitoring_agent
-from agents.orchestrator_agent import orchestrator_agent
+from agents.orchestrator_agent import build_action, orchestrator_agent
 from agents.recovery_executor import Executor
 from agents.routing_agent import routing_agent
 from agents.security_agent import security_agent
@@ -92,6 +92,38 @@ def build_graph(
                 logger.warning("Could not record fault case: %s", exc)
         return out
 
+    def recommendation_check_node(state: AuraState) -> dict:
+        """If the diagnosis recommended something else than the final action, test it too."""
+        if state.get("error"):
+            return {}
+        rec = (state.get("diagnosis") or {}).get("recommended_action")
+        final = (state.get("recovery_action") or {}).get("action_type")
+        if not rec or rec == final:
+            out = {"status": "same_as_final", "recommended": rec}
+        elif rec in {"no_action", "wait_for_reconnection"}:
+            out = {"status": "nothing_to_execute", "recommended": rec}
+        else:
+            action = build_action(rec, state, cfg)
+            if action is None:
+                out = {"status": "not_applicable", "recommended": rec}
+            else:
+                v = validate_action(action.model_dump(), state, cfg, executor.backend, executor.ready())
+                try:
+                    ex = executor.execute(action.model_dump(), v.model_dump(), state)
+                    ver = verify({**state, "execution_result": ex.model_dump()}, cfg)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("What-if check failed: %s", exc)
+                    out = {"status": "failed", "recommended": rec, "error": str(exc)}
+                else:
+                    out = {"status": "tested", "recommended": rec, "action": action.model_dump(),
+                           "validation": v.model_dump(), "execution": ex.model_dump(),
+                           "verification": ver.model_dump()}
+        summary = out["status"] + (f" ({out['recommended']})" if out.get("recommended") else "")
+        if out.get("verification"):
+            summary += f" -> {out['verification']['status']}"
+        return {"recommendation_check": out,
+                "trace": [{"agent": "what_if", "summary": summary}]}
+
     def baseline_node(state: AuraState) -> dict:
         if state.get("error"):
             return {}
@@ -119,6 +151,7 @@ def build_graph(
     g.add_node("validation", validation_node)
     g.add_node("execution", execution_node)
     g.add_node("verification", verification_node)
+    g.add_node("what_if", recommendation_check_node)
     g.add_node("baseline", baseline_node)
 
     g.add_edge(START, "monitoring")
@@ -128,6 +161,7 @@ def build_graph(
     g.add_conditional_edges("orchestrator", stop_on_error("validation"), ["validation", END])
     g.add_edge("validation", "execution")
     g.add_edge("execution", "verification")
-    g.add_edge("verification", "baseline")
+    g.add_edge("verification", "what_if")
+    g.add_edge("what_if", "baseline")
     g.add_edge("baseline", END)
     return g.compile()

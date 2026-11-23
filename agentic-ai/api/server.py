@@ -5,6 +5,7 @@ Run:  python aura.py serve            (http://127.0.0.1:8000/docs for Swagger)
 
 Endpoints
 ---------
+GET  /ui?time=T&backend=B        HTML page: the moment analysed with vs without the LLM
 GET  /health                     status, LLM / RAG / ns-3 availability
 GET  /run                        run info: times, nodes, protocol, data availability
 GET  /metrics?time=T             network_metrics row + windowed metrics at T
@@ -33,12 +34,14 @@ if str(_AGENTIC_AI_DIR) not in sys.path:
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import HTMLResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from agents.monitoring_agent import detect_anomalies  # noqa: E402
 from agents.recovery_executor import Ns3RerunExecutor  # noqa: E402
 from data_loader import DataLoadError, build_state  # noqa: E402
 from pipeline import AuraPipeline  # noqa: E402
+from report import render_comparison, render_ui_start, ui_form  # noqa: E402
 from topology import topology_from_state  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -88,6 +91,21 @@ def create_app(pipeline: AuraPipeline | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/ui", response_class=HTMLResponse)
+    def ui(time: float | None = None, backend: Backend = "dry_run", data_dir: str | None = None):
+        """Browser page comparing the LLM and rule-based results for one time."""
+        p = pipe()
+        try:
+            ds = p.dataset(data_dir)
+        except DataLoadError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if time is None:
+            return render_ui_start(backend, ds.start_time, ds.end_time)
+        state_at(time, data_dir)  # validates the time
+        with_llm, without_llm = p.analyze_both(time, data_dir, backend)
+        form = ui_form(time, backend, ds.start_time, ds.end_time)
+        return render_comparison(with_llm, without_llm, getattr(p.llm, "name", None), form)
 
     @app.get("/health")
     def health():

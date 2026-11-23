@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,11 +30,19 @@ def _print_analysis(r: dict) -> None:
         print(f"  {e['agent']:<13}{e['summary']}")
     d = r.get("diagnosis") or {}
     if d.get("findings"):
-        print("\nDiagnosis findings:")
+        print(f"\nDiagnosis ({d.get('method')}):")
+        print(f"  Root cause: {d.get('root_cause')}")
+        print(f"  Recommended action: {d.get('recommended_action')} (confidence {d.get('confidence', 0):.2f})")
+        print("  Findings:")
         for f in d["findings"]:
-            print(f"  - {f['fault']} (conf {f['confidence']:.2f}) nodes={f['affected_nodes']}")
+            print(f"   - {f['fault']} (conf {f['confidence']:.2f}) nodes={f['affected_nodes']}")
+            for e in f.get("evidence", []):
+                print(f"       evidence: {e}")
+        if d.get("reasoning"):
+            print("  Reasoning:")
+            print(textwrap.fill(d["reasoning"], 100, initial_indent="    ", subsequent_indent="    "))
         if d.get("sources"):
-            print("  sources: " + ", ".join(s["chunk_id"] for s in d["sources"]))
+            print("  Knowledge cited: " + ", ".join(s["chunk_id"] for s in d["sources"]))
         for n in d.get("notes", []):
             print(f"  note: {n}")
     a = r.get("recovery_action") or {}
@@ -43,6 +52,15 @@ def _print_analysis(r: dict) -> None:
     print(f"\nVerification: {v.get('status')} ({v.get('mode')})")
     for n in v.get("notes", []):
         print(f"  {n}")
+    chk = r.get("recommendation_check") or {}
+    if chk.get("status") == "tested":
+        cv = chk.get("verification") or {}
+        print(f"\nWhat if the diagnosis recommendation ({chk['recommended']}) were followed: "
+              f"{cv.get('status')} ({cv.get('mode')})")
+        for n in cv.get("notes", [])[:1]:
+            print(f"  {n}")
+    elif chk.get("status") not in (None, "same_as_final"):
+        print(f"\nDiagnosis recommendation ({chk.get('recommended')}): {chk.get('status')}")
     b = (r.get("baseline_action") or {}).get("action", {})
     print(f"\nRule-based baseline would choose: {b.get('action_type')} {json.dumps(b.get('parameters', {}))}")
 
@@ -58,6 +76,8 @@ def main() -> None:
     a.add_argument("--backend", choices=["dry_run", "ns3_rerun"])
     a.add_argument("--no-llm", action="store_true", help="force rule-based diagnosis")
     a.add_argument("--json", action="store_true", help="print the full JSON state")
+    a.add_argument("--no-popup", action="store_true",
+                   help="do not open the with/without-LLM report in the browser")
 
     m = sub.add_parser("monitor", help="anomaly timeline (monitoring agent only)")
     m.add_argument("--step", type=float, default=1.0)
@@ -110,14 +130,31 @@ def main() -> None:
 
     pipe = AuraPipeline(cfg)
     if args.cmd == "analyze":
-        result = pipe.analyze(args.time, args.data_dir, args.backend, use_llm=not args.no_llm)
+        report = None
+        if args.no_llm:
+            result = pipe.analyze(args.time, args.data_dir, args.backend, use_llm=False)
+        else:
+            # Always analyse with AND without the LLM, so both can be compared
+            result, rule_result = pipe.analyze_both(args.time, args.data_dir, args.backend)
+            report = pipe.write_report(result, rule_result)
         if args.json:
             print(json.dumps({k: v for k, v in result.items() if k not in
                               {"mobility_history", "packets_snapshot", "mobility_snapshot"}},
                              indent=1, default=str))
         else:
             _print_analysis(result)
+            if report is not None:
+                rule_action = rule_result["recovery_action"]["action_type"]
+                same = rule_action == result["recovery_action"]["action_type"]
+                print(f"\nWithout LLM (rule-based) the decision is: {rule_action}"
+                      f"{'  (same)' if same else '  (DIFFERENT)'}")
             print(f"\nSaved: {cfg.RESULTS_DIR / 'latest.json'}")
+        if report is not None:
+            print(f"Report (with vs without LLM): {report}")
+            if not args.no_popup:
+                import webbrowser
+
+                webbrowser.open(report.resolve().as_uri())
     elif args.cmd == "monitor":
         for row in pipe.monitor_sweep(args.data_dir, args.start, args.end, args.step):
             print(f"t={row['time']:6g}  {row['max_severity'] or '-':8s}  {', '.join(row['types']) or '-'}")

@@ -143,3 +143,66 @@ def test_baseline_differs_from_agentic_on_partition(partition_run, test_settings
     st = build_state(load_dataset(partition_run), 2.0, test_settings)
     st = _full_state({**st, **monitoring_agent(st)}, test_settings)
     assert baseline_decide(st, test_settings).action_type == "increase_tx_range"
+
+
+def _routes_state(cfg, n_disconnected: int, n_connected: int, diagnosis: dict | None = None) -> dict:
+    """Hand-built orchestrator input: some failing flows partitioned, some reroutable."""
+    routes = [{"flow_id": i, "source": i, "destination": 50 + i, "connected": False,
+               "window_pdr": 0.0, "best": None} for i in range(n_disconnected)]
+    routes += [{"flow_id": 100 + i, "source": 100 + i, "destination": 150 + i, "connected": True,
+                "window_pdr": 0.0,
+                "best": {"path": [100 + i, 7, 150 + i], "score": 0.3, "hop_count": 2,
+                         "min_link_lifetime_s": 5.0}} for i in range(n_connected)]
+    return {
+        "anomalies": [{"type": "flow_outage", "severity": "high"}],
+        "candidate_routes": routes,
+        "flow_stats": [{"flow_id": r["flow_id"]} for r in routes],
+        "diagnosis": diagnosis or {},
+        "security_report": {},
+        "protocol": "AODV",
+        "comm_range_m": 100.0,
+        "data_availability": {},
+    }
+
+
+def test_partition_majority_raises_range_before_rerouting(test_settings):
+    act = decide(_routes_state(test_settings, n_disconnected=8, n_connected=2), test_settings)
+    assert act.action_type == "increase_tx_range"
+    assert "reroute_flow" in act.alternatives
+
+
+def test_majority_partition_beats_protocol_switch(test_settings):
+    diag = {"method": "rule_based", "recommended_action": "switch_protocol", "confidence": 0.5}
+    act = decide(_routes_state(test_settings, 3, 0, diag), test_settings)
+    assert act.action_type == "increase_tx_range" and "switch_protocol" in act.alternatives
+
+
+def test_minority_partition_still_reroutes(test_settings):
+    act = decide(_routes_state(test_settings, n_disconnected=1, n_connected=3), test_settings)
+    assert act.action_type == "reroute_flow"
+
+
+def test_llm_cannot_downgrade_majority_partition_to_waiting(test_settings):
+    diag = {"method": "llm_rag", "recommended_action": "wait_for_reconnection", "confidence": 0.95}
+    act = decide(_routes_state(test_settings, 8, 0, diag), test_settings)
+    assert act.action_type == "increase_tx_range"
+    assert "healed first" in act.rationale
+
+
+def test_llm_fact_check_catches_wrong_connectivity_claims(tmp_path, test_settings, fake_llm_cls):
+    st = _square_state(tmp_path, test_settings)  # flow 0 (0->3) is connected
+    llm = fake_llm_cls({
+        "root_cause": "partition",
+        "findings": [{"fault": "topology_partition", "confidence": 0.9, "affected_nodes": [0, 3]}],
+        "recommended_action": "increase_tx_range",
+        "reasoning": "...",
+        "claimed_disconnected_flows": [0],
+        "claimed_isolated_nodes": [2],
+    })
+    d = make_diagnosis_agent(llm, None, test_settings)(st)["diagnosis"]
+    fc = d["fact_check"]
+    assert fc["passed"] is False
+    assert fc["wrongly_claimed_disconnected"] == [0] and fc["wrongly_claimed_isolated"] == [2]
+    assert d["confidence"] == 0.6  # 0.9 - 2 x 0.15
+    assert any("Fact-check" in n for n in d["notes"])
+    assert '"flow_connectivity"' in llm.calls[0][1]

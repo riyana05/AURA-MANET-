@@ -61,6 +61,17 @@ python aura.py serve --port 8000                         # API, docs at http://1
 
 Each `analyze` call writes `results/<run>/t<time>.json` and `results/latest.json` for the visualizer.
 
+### With vs without LLM (pop-up report)
+
+`analyze` always analyses the moment twice: once with the LLM and once rule-based. It then opens
+`results/report.html` in your browser, showing both diagnoses side by side. Each side shows the
+reasoning, evidence, cited knowledge, final action, validation and ns-3 verification, and a
+banner says whether the two decisions differ.
+
+- Add `--no-popup` to skip opening the browser. The file is still written.
+- `--no-llm` runs only the rule-based mode, with no report.
+- With the server running, open http://127.0.0.1:8000/ui to pick any time in the browser.
+
 ### API (for the Qt visualizer)
 
 | Method | Path | Body / query |

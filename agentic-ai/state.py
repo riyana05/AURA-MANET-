@@ -76,6 +76,9 @@ class AuraState(TypedDict, total=False):
     """Executor -> ``schemas.ExecutionResult``."""
     verification_result: dict
     """RecoveryVerificationAgent -> ``schemas.VerificationResult``."""
+    recommendation_check: dict
+    """What-if test of the diagnosis' recommended action when it differs from
+    the final decision: ``{status, action, validation, execution, verification}``."""
     baseline_action: dict
     """Rule-based baseline decision for the same input (for comparison)."""
 

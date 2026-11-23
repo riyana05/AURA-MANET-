@@ -285,6 +285,7 @@ def build_state(dataset: Dataset, time: float, settings, simulation_id: str = ""
         "validation": {},
         "execution_result": {},
         "verification_result": {},
+        "recommendation_check": {},
         "baseline_action": {},
         "trace": [],
         "error": None,

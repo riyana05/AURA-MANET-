@@ -79,6 +79,34 @@ class AuraPipeline:
             self.save(result)
         return result
 
+    def analyze_both(
+        self,
+        time: float,
+        data_dir: Path | str | None = None,
+        backend: str | None = None,
+    ) -> tuple[dict, dict]:
+        """Analyse the same moment with the LLM and without it (rule-based).
+
+        Returns ``(with_llm, without_llm)``.  If no LLM is configured the first
+        result is rule-based too and says so in its diagnosis notes.
+        """
+        with_llm = self.analyze(time, data_dir, backend, use_llm=True, save=True)
+        without_llm = self.analyze(time, data_dir, backend, use_llm=False, save=False)
+        return with_llm, without_llm
+
+    def write_report(self, with_llm: dict, without_llm: dict) -> Path:
+        """Write the side-by-side HTML report; returns results/report.html."""
+        from report import render_comparison
+
+        page = render_comparison(with_llm, without_llm, getattr(self.llm, "name", None))
+        self.cfg.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        out_dir = self.cfg.RESULTS_DIR / str(with_llm.get("simulation_id", "run"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"report_t{float(with_llm['current_time']):g}.html").write_text(page)
+        latest = self.cfg.RESULTS_DIR / "report.html"
+        latest.write_text(page)
+        return latest
+
     def save(self, result: dict) -> Path:
         """Write the result for the visualizer: results/<run>/t<time>.json + latest.json."""
         out_dir = self.cfg.RESULTS_DIR / str(result.get("simulation_id", "run"))
